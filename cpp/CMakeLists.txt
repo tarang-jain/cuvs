@@ -173,6 +173,7 @@ rapids_cpm_init()
 if(NOT BUILD_CPU_ONLY)
   include(cmake/thirdparty/get_raft.cmake)
   include(cmake/thirdparty/get_cutlass.cmake)
+  include(cmake/thirdparty/get_bang.cmake)
 endif()
 
 if(BUILD_C_LIBRARY)
@@ -454,6 +455,7 @@ if(BUILD_SHARED_LIBS)
     src/neighbors/vamana_serialize_float.cu
     src/neighbors/vamana_serialize_uint8.cu
     src/neighbors/vamana_serialize_int8.cu
+    src/neighbors/bang_search_float.cu
     src/selection/select_k_float_int64_t.cu
     src/selection/select_k_float_int32_t.cu
     src/selection/select_k_float_uint32_t.cu
