@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "cuda_runtime_api.h"
 #include "utils.hpp"
 
 #include <raft/core/device_mdspan.hpp>
@@ -1167,7 +1168,7 @@ void optimize(
   const bool guarantee_connectivity = true,
   const bool use_gpu                = true)
 {
-  RAFT_LOG_DEBUG(
+  RAFT_LOG_INFO(
     "# Pruning kNN graph (size=%lu, degree=%lu)\n", knn_graph.extent(0), knn_graph.extent(1));
   auto large_tmp_mr = raft::resource::get_large_workspace_resource(res);
 
@@ -1240,10 +1241,10 @@ void optimize(
         auto d_input_graph =
           raft::make_device_matrix<IdxT, int64_t>(res, graph_size, knn_graph_degree);
       } catch (std::bad_alloc& e) {
-        RAFT_LOG_DEBUG("Insufficient memory for 2-hop node counting on GPU");
+        RAFT_LOG_INFO("Insufficient memory for 2-hop node counting on GPU");
         _use_gpu = false;
       } catch (raft::logic_error& e) {
-        RAFT_LOG_DEBUG("Insufficient memory for 2-hop node counting on GPU (logic error)");
+        RAFT_LOG_INFO("Insufficient memory for 2-hop node counting on GPU (logic error)");
         _use_gpu = false;
       }
     }
@@ -1299,6 +1300,10 @@ void optimize(
         dev_stats.data_handle(), 0, sizeof(uint64_t) * 2, raft::resource::get_cuda_stream(res)));
 
       for (uint32_t i_batch = 0; i_batch < num_batch; i_batch++) {
+        size_t free      = 0;
+        size_t total     = 0;
+        cudaMemGetInfo(&free, &total);
+        RAFT_LOG_INFO("now calling kern_prune free %zu total %zu used %zu", free, total, total - free);
         kern_prune<MAX_DEGREE, IdxT>
           <<<blocks_prune, threads_prune, 0, raft::resource::get_cuda_stream(res)>>>(
             d_input_graph.data_handle(),

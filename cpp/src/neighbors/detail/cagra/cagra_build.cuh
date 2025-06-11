@@ -614,6 +614,10 @@ auto iterative_build_graph(
                  batch_dev_neighbors_view.data_handle(),
                  batch_neighbors_view.size(),
                  raft::resource::get_cuda_stream(res));
+      size_t free      = 0;
+      size_t total     = 0;
+      cudaMemGetInfo(&free, &total);
+      RAFT_LOG_INFO("inside batched query free %zu total %zu used %zu", free, total, total - free);
     }
 
     // Optimize graph
