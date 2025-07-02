@@ -89,19 +89,21 @@ class cuvs_cagra : public algo<T>, public algo_gpu {
 
     void prepare_build_params(const raft::extent_2d<IdxT>& dataset_extents)
     {
-      if (algo == CagraBuildAlgo::kIvfPq) {
-        auto pq_params = cuvs::neighbors::cagra::graph_build_params::ivf_pq_params(
-          dataset_extents, cagra_params.metric);
-        if (ivf_pq_build_params) { pq_params.build_params = *ivf_pq_build_params; }
-        if (ivf_pq_search_params) { pq_params.search_params = *ivf_pq_search_params; }
-        if (ivf_pq_refine_rate) { pq_params.refinement_rate = *ivf_pq_refine_rate; }
-        cagra_params.graph_build_params = pq_params;
-      } else if (algo == CagraBuildAlgo::kNnDescent) {
-        auto nn_params = cuvs::neighbors::cagra::graph_build_params::nn_descent_params(
-          cagra_params.intermediate_graph_degree);
-        if (nn_descent_params) { nn_params = *nn_descent_params; }
-        cagra_params.graph_build_params = nn_params;
-      }
+      // if (algo == CagraBuildAlgo::kIvfPq) {
+      //   auto pq_params = cuvs::neighbors::cagra::graph_build_params::ivf_pq_params(
+      //     dataset_extents, cagra_params.metric);
+      //   if (ivf_pq_build_params) { pq_params.build_params = *ivf_pq_build_params; }
+      //   if (ivf_pq_search_params) { pq_params.search_params = *ivf_pq_search_params; }
+      //   if (ivf_pq_refine_rate) { pq_params.refinement_rate = *ivf_pq_refine_rate; }
+      //   cagra_params.graph_build_params = pq_params;
+      // } else if (algo == CagraBuildAlgo::kNnDescent) {
+      //   auto nn_params = cuvs::neighbors::cagra::graph_build_params::nn_descent_params(
+      //     cagra_params.intermediate_graph_degree);
+      //   if (nn_descent_params) { nn_params = *nn_descent_params; }
+      //   cagra_params.graph_build_params = nn_params;
+      // }
+      auto cs_params = cuvs::neighbors::cagra::graph_build_params::iterative_search_params();
+      cagra_params.graph_build_params = cs_params;
     }
   };
 
@@ -119,7 +121,9 @@ class cuvs_cagra : public algo<T>, public algo_gpu {
           nullptr, 0, 0))
 
   {
-    index_params_.cagra_params.metric         = parse_metric_type(metric);
+    // index_params_.cagra_params.metric         = parse_metric_type(metric);
+    // index_params_.ivf_pq_build_params->metric = parse_metric_type(metric);
+    index_params_.cagra_params.metric         = cuvs::distance::DistanceType::BitwiseHamming;
     index_params_.ivf_pq_build_params->metric = parse_metric_type(metric);
   }
 
