@@ -102,7 +102,9 @@ class cuvs_cagra : public algo<T>, public algo_gpu {
       //   if (nn_descent_params) { nn_params = *nn_descent_params; }
       //   cagra_params.graph_build_params = nn_params;
       // }
-      auto cs_params = cuvs::neighbors::cagra::graph_build_params::iterative_search_params();
+      // auto cs_params = cuvs::neighbors::cagra::graph_build_params::iterative_search_params();
+      auto cs_params = cuvs::neighbors::cagra::search_params();
+      cs_params.itopk_size = 16;
       cagra_params.graph_build_params = cs_params;
     }
   };
