@@ -637,6 +637,17 @@ auto iterative_build_graph(
 
       auto batch_neighbors_view = raft::make_host_matrix_view<IdxT, int64_t>(
         neighbors_view.data_handle() + batch.offset() * curr_topk, batch.size(), curr_topk);
+      
+      // DEBUG: raft::copy in iterative_build_graph for BitwiseHamming
+      if (params.metric == cuvs::distance::DistanceType::BitwiseHamming) {
+        RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy in iterative_build_graph - copying batch neighbors from device to host");
+        RAFT_LOG_INFO("  - batch.size(): %zu, curr_topk: %lu, batch.offset(): %zu", 
+                       batch.size(), (uint64_t)curr_topk, batch.offset());
+        RAFT_LOG_INFO("  - source: batch_dev_neighbors_view.data_handle()");
+        RAFT_LOG_INFO("  - dest: batch_neighbors_view.data_handle()"); 
+        RAFT_LOG_INFO("  - size: %zu elements", batch_neighbors_view.size());
+      }
+      
       raft::copy(batch_neighbors_view.data_handle(),
                  batch_dev_neighbors_view.data_handle(),
                  batch_neighbors_view.size(),

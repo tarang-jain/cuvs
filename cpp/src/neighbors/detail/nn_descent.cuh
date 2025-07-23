@@ -289,7 +289,8 @@ RAFT_KERNEL preprocess_data_kernel(
       } else if (metric == cuvs::distance::DistanceType::BitwiseHamming) {
         int idx_for_byte           = list_id * dim + idx;  // uint8 or int8 data
         uint8_t* output_bytes      = reinterpret_cast<uint8_t*>(output_data);
-        output_bytes[idx_for_byte] = input_data[idx_for_byte];
+        // Fix: use blockIdx.x for batch offset, not list_id which includes list_offset
+        output_bytes[idx_for_byte] = input_data[(size_t)blockIdx.x * dim + idx];
       } else {  // L2Expanded or L2SqrtExpanded
         output_data[list_id * dim + idx] = input_data[(size_t)blockIdx.x * dim + idx];
         if (idx == 0) { l2_norms[list_id] = l2_norm; }
@@ -1071,6 +1072,15 @@ void GNND<Data_t, Index_t>::add_reverse_edges(Index_t* graph_ptr,
 {
   add_rev_edges_kernel<<<nrow_, raft::warp_size(), 0, stream>>>(
     graph_ptr, d_rev_graph_ptr, NUM_SAMPLES, list_sizes);
+  
+  // DEBUG: raft::copy in add_reverse_edges for BitwiseHamming
+  if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+    RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy in nn_descent add_reverse_edges");
+    RAFT_LOG_INFO("  - copying reverse edges from device to host");
+    RAFT_LOG_INFO("  - nrow_: %zu, NUM_SAMPLES: %d", nrow_, NUM_SAMPLES);
+    RAFT_LOG_INFO("  - size: %zu elements", nrow_ * NUM_SAMPLES);
+  }
+  
   raft::copy(
     h_rev_graph_ptr, d_rev_graph_ptr, nrow_ * NUM_SAMPLES, raft::resource::get_cuda_stream(res));
 }
@@ -1107,6 +1117,7 @@ void GNND<Data_t, Index_t>::build(Data_t* data,
                                   DistData_t* output_distances,
                                   DistEpilogue_t dist_epilogue)
 {
+  RAFT_LOG_INFO("BitwiseHamming DEBUG: INSIDE nnd.build");
   using input_t = typename std::remove_const<Data_t>::type;
 
   if (build_config_.metric == cuvsDistanceType::BitwiseHamming &&
@@ -1129,7 +1140,14 @@ void GNND<Data_t, Index_t>::build(Data_t* data,
 
   cuvs::spatial::knn::detail::utils::batch_load_iterator vec_batches{
     data, static_cast<size_t>(nrow_), build_config_.dataset_dim, batch_size, stream};
+  RAFT_LOG_INFO("BitwiseHamming DEBUG: nrow_: %zu", static_cast<size_t>(nrow_));
   for (auto const& batch : vec_batches) {
+    RAFT_LOG_INFO("BitwiseHamming DEBUG: INSIDE nnd.build - calling preprocess_data_kernel");
+    RAFT_LOG_INFO("  - batch.size(): %zu", batch.size());
+    RAFT_LOG_INFO("  - batch.offset(): %zu", batch.offset());
+    RAFT_LOG_INFO("  - build_config_.dataset_dim: %zu", build_config_.dataset_dim);
+    RAFT_LOG_INFO("  - l2_norms_.data_handle(): %p", l2_norms_.data_handle());
+    RAFT_LOG_INFO("  - build_config_.metric: %d", build_config_.metric);
     preprocess_data_kernel<<<
       batch.size(),
       raft::warp_size(),
@@ -1141,7 +1159,10 @@ void GNND<Data_t, Index_t>::build(Data_t* data,
                 l2_norms_.data_handle(),
                 batch.offset(),
                 build_config_.metric);
-  }
+      cudaDeviceSynchronize();
+      RAFT_LOG_INFO("BitwiseHamming DEBUG: preprocess_data_kernel completed");
+    }
+    RAFT_LOG_INFO("BitwiseHamming DEBUG: ALL BATCHES preprocess_data_kernel completed");
 
   graph_.clear();
   graph_.init_random_graph();
@@ -1161,16 +1182,38 @@ void GNND<Data_t, Index_t>::build(Data_t* data,
     }
     graph_.sample_graph(false);
   };
+  cudaDeviceSynchronize();
+  RAFT_LOG_INFO("BitwiseHamming DEBUG: update_and_sample completed");
 
   for (size_t it = 0; it < build_config_.max_iterations; it++) {
+    // DEBUG: raft::copy operations in main nn_descent loop for BitwiseHamming
+    if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+      RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy in nn_descent main loop, iteration %zu", it);
+      RAFT_LOG_INFO("  - copying list sizes from host to device");
+      RAFT_LOG_INFO("  - nrow_: %zu", nrow_);
+    }
+    
     raft::copy(d_list_sizes_new_.data_handle(),
                graph_.h_list_sizes_new.data_handle(),
                nrow_,
                raft::resource::get_cuda_stream(res));
+               
+    // DEBUG: raft::copy for graph_old
+    if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+      RAFT_LOG_INFO("  - copying h_graph_old from graph");
+    }
+    
     raft::copy(h_graph_old_.data_handle(),
                graph_.h_graph_old.data_handle(),
                nrow_ * NUM_SAMPLES,
                raft::resource::get_cuda_stream(res));
+               
+    // DEBUG: raft::copy for list_sizes_old
+    if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+      RAFT_LOG_INFO("  - copying list_sizes_old from host to device");
+      RAFT_LOG_INFO("  - size: %zu elements", nrow_);
+    }
+    
     raft::copy(d_list_sizes_old_.data_handle(),
                graph_.h_list_sizes_old.data_handle(),
                nrow_,
@@ -1215,11 +1258,25 @@ void GNND<Data_t, Index_t>::build(Data_t* data,
     update_and_sample_thread.join();
 
     if (update_counter_ == -1) { break; }
+    
+    // DEBUG: raft::copy for graph and distances buffers
+    if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+      RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy graph_buffer_ to graph_host_buffer_");
+      RAFT_LOG_INFO("  - size: %zu elements (nrow_ * DEGREE_ON_DEVICE)", nrow_ * DEGREE_ON_DEVICE);
+    }
+    
     raft::copy(graph_host_buffer_.data_handle(),
                graph_buffer_.data_handle(),
                nrow_ * DEGREE_ON_DEVICE,
                raft::resource::get_cuda_stream(res));
     raft::resource::sync_stream(res);
+    
+    // DEBUG: raft::copy for distances buffer
+    if (build_config_.metric == cuvsDistanceType::BitwiseHamming) {
+      RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy dists_buffer_ to dists_host_buffer_");
+      RAFT_LOG_INFO("  - size: %zu elements", nrow_ * DEGREE_ON_DEVICE);
+    }
+    
     raft::copy(dists_host_buffer_.data_handle(),
                dists_buffer_.data_handle(),
                nrow_ * DEGREE_ON_DEVICE,
@@ -1305,6 +1362,7 @@ void build(raft::resources const& res,
            raft::mdspan<const T, raft::matrix_extent<int64_t>, raft::row_major, Accessor> dataset,
            index<IdxT>& idx)
 {
+  RAFT_LOG_INFO("BitwiseHamming DEBUG: INSIDE nn_descent build");
   size_t extended_graph_degree, graph_degree;
   auto build_config = get_build_config(res,
                                        params,
@@ -1320,6 +1378,7 @@ void build(raft::resources const& res,
   GNND<const T, int> nnd(res, build_config);
 
   if (idx.distances().has_value() || !params.return_distances) {
+    RAFT_LOG_INFO("BitwiseHamming DEBUG: INSIDE nn_descent build - calling nnd.build");
     nnd.build(dataset.data_handle(),
               dataset.extent(0),
               int_graph.data_handle(),

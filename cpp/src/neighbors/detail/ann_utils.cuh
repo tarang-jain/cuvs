@@ -521,6 +521,15 @@ struct batch_load_iterator {
           if (prefetch_ && prefetch_pos_ == pos_) {
             std::swap(dev_ptr_, prefetch_dev_ptr_);
           } else {
+            RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy in batch_load_iterator::copy");
+            RAFT_LOG_INFO("  - offset: %zu", offset());
+            RAFT_LOG_INFO("  - size: %zu", size());
+            RAFT_LOG_INFO("  - row_width: %zu", row_width());
+            RAFT_LOG_INFO("  - source_: %p", source_);
+            RAFT_LOG_INFO("  - dev_ptr_: %p", dev_ptr_);
+            RAFT_LOG_INFO("  - source_ + offset() * row_width(): %p", source_ + offset() * row_width());
+            RAFT_LOG_INFO("  - size() * row_width(): %zu", size() * row_width());
+            RAFT_LOG_INFO("  - stream_: %p", stream_);
             raft::copy(dev_ptr_, source_ + offset() * row_width(), size() * row_width(), stream_);
           }
         }
@@ -542,6 +551,13 @@ struct batch_load_iterator {
         size_t(prefetch_offset),
         size_t(prefetch_size),
         size_t(row_width()));
+      RAFT_LOG_INFO("BitwiseHamming DEBUG: raft::copy in batch_load_iterator::prefetch");
+      RAFT_LOG_INFO("  - prefetch_offset: %zu", prefetch_offset);
+      RAFT_LOG_INFO("  - prefetch_size: %zu", prefetch_size);
+      RAFT_LOG_INFO("  - row_width(): %zu", row_width());
+      RAFT_LOG_INFO("  - source_: %p", source_);
+      RAFT_LOG_INFO("  - prefetch_dev_ptr_: %p", prefetch_dev_ptr_);
+      RAFT_LOG_INFO("  - source_ + prefetch_offset * row_width(): %p", source_ + prefetch_offset * row_width());
       raft::copy(prefetch_dev_ptr_,
                  source_ + prefetch_offset * row_width(),
                  prefetch_size * row_width(),
