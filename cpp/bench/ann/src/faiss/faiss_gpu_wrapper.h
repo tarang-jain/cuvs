@@ -26,6 +26,7 @@
 #include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexRefine.h>
 #include <faiss/IndexScalarQuantizer.h>
+#include <faiss/gpu/GpuIndexBinaryCagra.h>
 #include <faiss/gpu/GpuIndexCagra.h>
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/GpuIndexIVFFlat.h>
@@ -671,5 +672,80 @@ class faiss_gpu_cagra_hnsw : public faiss_gpu<T> {
  private:
   std::shared_ptr<faiss_gpu_cagra<T>> build_index_;
   std::shared_ptr<faiss::IndexHNSWCagra> search_index_;
+};
+
+template <typename T>
+class faiss_gpu_binary_cagra : public faiss_gpu<T> {
+ public:
+  struct build_param : public faiss_gpu<T>::build_param {
+    size_t intermediate_graph_degree;
+    /// Degree of output graph.
+    size_t graph_degree;
+    /// ANN algorithm to build knn graph.
+    std::string cagra_build_algo;
+    /// Number of Iterations to run if building with NN_DESCENT
+    size_t nn_descent_niter;
+
+    std::shared_ptr<faiss::gpu::IVFPQBuildCagraConfig> ivf_pq_build_params = nullptr;
+
+    std::shared_ptr<faiss::gpu::IVFPQSearchCagraConfig> ivf_pq_search_params = nullptr;
+  };
+  using typename faiss_gpu<T>::search_param_base;
+  struct search_param : public faiss_gpu<T>::search_param {
+    faiss::gpu::SearchParametersCagra p;
+  };
+
+  faiss_gpu_binary_cagra(Metric metric, int dim, const build_param& param)
+    : faiss_gpu<T>(metric, dim, param)
+  {
+    faiss::gpu::GpuIndexCagraConfig config;
+    config.graph_degree              = param.graph_degree;
+    config.intermediate_graph_degree = param.intermediate_graph_degree;
+    config.device                    = this->device_;
+    config.store_dataset             = true;
+    if (param.cagra_build_algo == "IVF_PQ") {
+      config.build_algo           = faiss::gpu::graph_build_algo::IVF_PQ;
+      this->ivf_pq_build_params_  = param.ivf_pq_build_params;
+      config.ivf_pq_params        = this->ivf_pq_build_params_;
+      this->ivf_pq_search_params_ = param.ivf_pq_search_params;
+      config.ivf_pq_search_params = this->ivf_pq_search_params_;
+      config.refine_rate          = 1.0;
+    } else {
+      config.build_algo = faiss::gpu::graph_build_algo::NN_DESCENT;
+    }
+    config.nn_descent_niter = param.nn_descent_niter;
+
+    this->index_ = std::make_shared<faiss::gpu::GpuIndexBinaryCagra>(
+      this->gpu_resource_.get(), dim, parse_metric_faiss(this->metric_), config);
+  }
+
+  void set_search_param(const search_param_base& param, const void* filter_bitset) override
+  {
+    if (filter_bitset != nullptr) { throw std::runtime_error("Filtering is not supported yet."); }
+    auto sp              = static_cast<const typename faiss_gpu_binary_cagra<T>::search_param&>(param);
+    this->search_params_ = std::make_shared<faiss::gpu::SearchParametersCagra>(sp.p);
+  }
+
+  void save(const std::string& file) const override
+  {
+    omp_single_thread_scope omp_single_thread;
+
+    auto cpu_hnsw_index = std::make_unique<faiss::IndexBinaryHNSWCagra>();
+    // Only add the base HNSW layer to serialize the CAGRA index.
+    cpu_hnsw_index->base_level_only = true;
+    static_cast<faiss::gpu::GpuIndexBinaryCagra*>(this->index_.get())->copyTo(cpu_hnsw_index.get());
+    faiss::write_index_binary(cpu_hnsw_index.get(), file.c_str());
+  }
+  void load(const std::string& file) override
+  {
+    this->template load_<faiss::gpu::GpuIndexBinaryCagra, faiss::IndexBinaryHNSWCagra>(file);
+  }
+  std::unique_ptr<algo<T>> copy() override { return std::make_unique<faiss_gpu_binary_cagra<T>>(*this); };
+
+  std::shared_ptr<faiss::gpu::GpuIndex> faiss_index() { return this->index_; }
+
+ private:
+  std::shared_ptr<faiss::gpu::IVFPQBuildCagraConfig> ivf_pq_build_params_;
+  std::shared_ptr<faiss::gpu::IVFPQSearchCagraConfig> ivf_pq_search_params_;
 };
 }  // namespace cuvs::bench

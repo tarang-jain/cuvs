@@ -337,6 +337,31 @@ if(CUVS_ANN_BENCH_USE_GGNN)
   )
 endif()
 
+# ##################################################################################################
+# * Binary quantization converter utility ---------------------------------------------------------
+option(CUVS_BUILD_BINARY_QUANTIZE_CONVERTER "Build binary quantization converter utility" ON)
+
+if(CUVS_BUILD_BINARY_QUANTIZE_CONVERTER)
+  add_executable(convert_binary_quantize src/convert_binary_quantize.cpp)
+  target_link_libraries(
+    convert_binary_quantize
+    PRIVATE
+      cuvs::cuvs
+      raft::raft
+      CUDA::cudart
+      $<$<BOOL:${CUDAToolkit_FOUND}>:CUDA::cublas>
+      $<TARGET_NAME_IF_EXISTS:OpenMP::OpenMP_CXX>
+      $<TARGET_NAME_IF_EXISTS:conda_env>
+  )
+  target_compile_options(
+    convert_binary_quantize
+    PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:${CUVS_CXX_FLAGS}>
+      $<$<COMPILE_LANGUAGE:CUDA>:${CUVS_CUDA_FLAGS}>
+  )
+  install(TARGETS convert_binary_quantize DESTINATION bin)
+endif()
+
 if(CUVS_ANN_BENCH_USE_DISKANN)
   ConfigureAnnBench(
     NAME DISKANN_MEMORY PATH src/diskann/diskann_benchmark.cpp LINKS diskann::diskann aio
