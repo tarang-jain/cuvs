@@ -197,10 +197,13 @@ void cuvs_cagra<T, IdxT>::build(const T* dataset, size_t nrow)
   auto dataset_view_device =
     raft::make_mdspan<const T, IdxT, raft::row_major, false, true>(dataset, dataset_extents);
   bool dataset_is_on_host = raft::get_device_for_address(dataset) == -1;
+  RAFT_LOG_INFO("dataset_is_on_host: %d", dataset_is_on_host);
   if (index_params_.num_dataset_splits <= 1) {
+    RAFT_LOG_INFO("CAGRA build start");
     index_ = std::make_shared<cuvs::neighbors::cagra::index<T, IdxT>>(std::move(
       dataset_is_on_host ? cuvs::neighbors::cagra::build(handle_, params, dataset_view_host)
                          : cuvs::neighbors::cagra::build(handle_, params, dataset_view_device)));
+    RAFT_LOG_INFO("CAGRA build done");
   } else {
     IdxT rows_per_split =
       raft::ceildiv<IdxT>(nrow, static_cast<IdxT>(index_params_.num_dataset_splits));

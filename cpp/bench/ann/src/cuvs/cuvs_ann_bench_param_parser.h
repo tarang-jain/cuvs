@@ -287,6 +287,7 @@ void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index
     }
   }
 
+  RAFT_LOG_INFO("now apply build-algo-specific parameters");
   // Apply build-algo-specific parameters
   std::visit(
     [&](auto& arg) {

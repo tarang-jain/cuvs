@@ -391,6 +391,7 @@ void build_knn_graph(
   cuvs::neighbors::nn_descent::index_params build_params)
 {
   std::optional<raft::host_matrix_view<IdxT, int64_t, row_major>> graph_view = knn_graph;
+  RAFT_LOG_INFO("nn_descent build_params: graph_degree = %u", build_params.graph_degree);
   auto nn_descent_idx = cuvs::neighbors::nn_descent::build(res, build_params, dataset, graph_view);
 
   using internal_IdxT = typename std::make_unsigned<IdxT>::type;

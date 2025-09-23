@@ -1311,6 +1311,7 @@ auto build(raft::resources const& handle,
            raft::mdspan<const T, raft::matrix_extent<IdxT>, raft::row_major, accessor> dataset)
   -> index<IdxT>
 {
+  RAFT_LOG_INFO("ivf_pq::build start");
   IdxT n_rows = dataset.extent(0);
   IdxT dim    = dataset.extent(1);
   raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope(
