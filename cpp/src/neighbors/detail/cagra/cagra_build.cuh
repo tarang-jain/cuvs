@@ -770,6 +770,8 @@ index<T, IdxT> build(
 
       // Use nn-descent to build CAGRA knn graph
       nn_descent_params.return_distances = false;
+      // RAFT_LOG_INFO("nn_descent_params.graph_degree = %lu", nn_descent_params.graph_degree);
+      // RAFT_LOG_INFO("nn_descent_params.intermediate_degree = %lu", nn_descent_params.intermediate_graph_degree);
       build_knn_graph<T, IdxT>(res, dataset, knn_graph->view(), nn_descent_params);
     }
 

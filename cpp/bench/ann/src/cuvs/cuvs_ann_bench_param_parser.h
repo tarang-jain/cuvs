@@ -262,10 +262,23 @@ void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index
   // Override the graph_build_algo if requested explicitly
   if (conf.contains("graph_build_algo")) {
     if (conf.at("graph_build_algo") == "IVF_PQ") {
-      if (!std::holds_alternative<cuvs::neighbors::graph_build_params::ivf_pq_params>(
-            params.graph_build_params)) {
-        params.graph_build_params = cuvs::neighbors::graph_build_params::ivf_pq_params{};
-      }
+      // if (!std::holds_alternative<cuvs::neighbors::graph_build_params::ivf_pq_params>(
+            // params.graph_build_params)) {
+        // params.graph_build_params 
+        auto ivf_pq_params = cuvs::neighbors::graph_build_params::ivf_pq_params{};
+        cuvs::neighbors::ivf_pq::index_params ivf_pq_build_params;
+        ivf_pq_build_params.n_lists = 5000;
+        ivf_pq_build_params.pq_dim = 128;
+        ivf_pq_build_params.pq_bits = 8;
+        ivf_pq_build_params.kmeans_trainset_fraction = 0.1;
+        cuvs::neighbors::ivf_pq::search_params ivf_pq_search_params;
+        ivf_pq_search_params.n_probes = 2;
+        ivf_pq_search_params.internal_distance_dtype = CUDA_R_16F;
+        ivf_pq_search_params.lut_dtype = CUDA_R_16F;
+        ivf_pq_params.build_params = ivf_pq_build_params;
+        ivf_pq_params.search_params = ivf_pq_search_params;
+        params.graph_build_params = ivf_pq_params;
+      // }
     } else if (conf.at("graph_build_algo") == "NN_DESCENT") {
       if (!std::holds_alternative<cuvs::neighbors::graph_build_params::nn_descent_params>(
             params.graph_build_params)) {
@@ -275,38 +288,38 @@ void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index
   }
 
   // Parse build-algo-specific parameters and use them to decide on the algo type
-  nlohmann::json ivf_pq_build_conf  = collect_conf_with_prefix(conf, "ivf_pq_build_");
-  nlohmann::json ivf_pq_search_conf = collect_conf_with_prefix(conf, "ivf_pq_search_");
-  nlohmann::json nn_descent_conf    = collect_conf_with_prefix(conf, "nn_descent_");
+  // nlohmann::json ivf_pq_build_conf  = collect_conf_with_prefix(conf, "ivf_pq_build_");
+  // nlohmann::json ivf_pq_search_conf = collect_conf_with_prefix(conf, "ivf_pq_search_");
+  // nlohmann::json nn_descent_conf    = collect_conf_with_prefix(conf, "nn_descent_");
 
-  if (std::holds_alternative<std::monostate>(params.graph_build_params)) {
-    if (!ivf_pq_build_conf.empty() || !ivf_pq_search_conf.empty()) {
-      params.graph_build_params = cuvs::neighbors::graph_build_params::ivf_pq_params{};
-    } else if (!nn_descent_conf.empty()) {
-      params.graph_build_params = cuvs::neighbors::graph_build_params::nn_descent_params{};
-    } else {
-      params.graph_build_params = cuvs::neighbors::graph_build_params::iterative_search_params{};
-    }
-  }
+  // if (std::holds_alternative<std::monostate>(params.graph_build_params)) {
+  //   if (!ivf_pq_build_conf.empty() || !ivf_pq_search_conf.empty()) {
+  //     params.graph_build_params = cuvs::neighbors::graph_build_params::ivf_pq_params{};
+  //   } else if (!nn_descent_conf.empty()) {
+  //     params.graph_build_params = cuvs::neighbors::graph_build_params::nn_descent_params{};
+  //   } else {
+  //     params.graph_build_params = cuvs::neighbors::graph_build_params::iterative_search_params{};
+  //   }
+  // }
 
   // Apply build-algo-specific parameters
-  std::visit(
-    [&](auto& arg) {
-      using U = std::decay_t<decltype(arg)>;
-      if constexpr (std::is_same_v<U, cuvs::neighbors::graph_build_params::ivf_pq_params>) {
-        parse_build_param<T, IdxT>(ivf_pq_build_conf, arg.build_params);
-        typename cuvs::bench::cuvs_ivf_pq<T, IdxT>::search_param sparam;
-        sparam.pq_param     = arg.search_params;
-        sparam.refine_ratio = arg.refinement_rate;
-        parse_search_param<T, IdxT>(ivf_pq_search_conf, sparam);
-        arg.search_params   = sparam.pq_param;
-        arg.refinement_rate = sparam.refine_ratio;
-      } else if constexpr (std::is_same_v<U,
-                                          cuvs::neighbors::graph_build_params::nn_descent_params>) {
-        parse_build_param<T, IdxT>(nn_descent_conf, arg);
-      }
-    },
-    params.graph_build_params);
+  // std::visit(
+  //   [&](auto& arg) {
+  //     using U = std::decay_t<decltype(arg)>;
+  //     if constexpr (std::is_same_v<U, cuvs::neighbors::graph_build_params::ivf_pq_params>) {
+  //       // parse_build_param<T, IdxT>(ivf_pq_build_conf, arg.build_params);
+  //       typename cuvs::bench::cuvs_ivf_pq<T, IdxT>::search_param sparam;
+  //       sparam.pq_param     = arg.search_params;
+  //       sparam.refine_ratio = arg.refinement_rate;
+  //       // parse_search_param<T, IdxT>(ivf_pq_search_conf, sparam);
+  //       arg.search_params   = sparam.pq_param;
+  //       arg.refinement_rate = sparam.refine_ratio;
+  //     } else if constexpr (std::is_same_v<U,
+  //                                         cuvs::neighbors::graph_build_params::nn_descent_params>) {
+  //       // parse_build_param<T, IdxT>(nn_descent_conf, arg);
+  //     }
+  //   },
+  //   params.graph_build_params);
 }
 
 template <typename T, typename IdxT>

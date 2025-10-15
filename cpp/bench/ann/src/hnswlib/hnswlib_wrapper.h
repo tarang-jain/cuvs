@@ -71,7 +71,7 @@ class hnsw_lib : public algo<T> {
   struct build_param {
     int m;
     int ef_construction;
-    int num_threads = omp_get_num_procs();
+    int num_threads = omp_get_max_threads();
   };
 
   using search_param_base = typename algo<T>::search_param;

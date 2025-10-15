@@ -107,9 +107,15 @@ void serialize_to_hnswlib(
   //               "An hnswlib index can only be trained with int32 or uint32 IdxT");
   int dim = (dataset) ? dataset->extent(1) : index_.dim();
   raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope("cagra::serialize");
-  RAFT_LOG_DEBUG("Saving CAGRA index to hnswlib format, size %zu, dim %u",
+  RAFT_LOG_DEBUG("Saving CAGRA index to hnswlib format, size %zu, dim %u, graph_degree %u",
                  static_cast<size_t>(index_.size()),
-                 dim);
+                 dim,
+                 index_.graph_degree());
+  
+  // Validate index dimensions
+  RAFT_EXPECTS(index_.size() > 0, "Cannot serialize empty index");
+  RAFT_EXPECTS(dim > 0, "Invalid dimension: %d", dim);
+  RAFT_EXPECTS(index_.graph_degree() > 0, "Invalid graph degree: %u", index_.graph_degree());
 
   // offset_level_0
   std::size_t offset_level_0 = 0;
@@ -153,12 +159,37 @@ void serialize_to_hnswlib(
   // efConstruction, can be anything
   std::size_t efConstruction = 500;
   os.write(reinterpret_cast<char*>(&efConstruction), sizeof(std::size_t));
+  
+  // Log estimated file size
+  size_t header_size = 6 * sizeof(std::size_t) + sizeof(int) + sizeof(int) + 
+                       3 * sizeof(std::size_t) + sizeof(double) + sizeof(std::size_t);
+  size_t per_row_size = index_.graph_degree() * sizeof(IdxT) + sizeof(int) + 
+                        dim * sizeof(T) + sizeof(std::size_t);
+  size_t total_estimated_size = header_size + per_row_size * index_.size() + 
+                                sizeof(int) * index_.size();  // zeros at the end
+  float estimated_GiB = total_estimated_size / (1024.0f * 1024.0f * 1024.0f);
+  RAFT_LOG_INFO("Estimated HNSW file size: %.2f GiB (%.2f MB) for %zu rows, dim=%d, graph_degree=%u",
+                estimated_GiB, total_estimated_size / (1024.0f * 1024.0f),
+                static_cast<size_t>(index_.size()), dim, index_.graph_degree());
+  
+  // Check stream status before starting data write
+  if (!os.good()) {
+    RAFT_FAIL("Output stream is not good before starting data write. fail=%d, bad=%d, eof=%d",
+              os.fail(), os.bad(), os.eof());
+  }
 
   // Remove padding before saving the dataset
   raft::host_matrix<T, int64_t> host_dataset = raft::make_host_matrix<T, int64_t>(0, 0);
   raft::host_matrix_view<const T, int64_t> host_dataset_view;
   if (dataset) {
     host_dataset_view = *dataset;
+    RAFT_EXPECTS(dataset->extent(0) == index_.size(), 
+                 "Dataset row count mismatch: dataset has %zu rows, index has %zu",
+                 static_cast<size_t>(dataset->extent(0)), 
+                 static_cast<size_t>(index_.size()));
+    RAFT_EXPECTS(dataset->extent(1) == dim, 
+                 "Dataset dimension mismatch: dataset has %zu dims, expected %d",
+                 static_cast<size_t>(dataset->extent(1)), dim);
   } else {
     auto dataset = index_.dataset();
     RAFT_EXPECTS(dataset.size() > 0,
@@ -178,6 +209,15 @@ void serialize_to_hnswlib(
     host_dataset_view = raft::make_const_mdspan(host_dataset.view());
   }
   auto graph = index_.graph();
+  RAFT_EXPECTS(graph.extent(0) == index_.size(), 
+               "Graph row count mismatch: graph has %zu rows, index has %zu",
+               static_cast<size_t>(graph.extent(0)), 
+               static_cast<size_t>(index_.size()));
+  RAFT_EXPECTS(graph.extent(1) == index_.graph_degree(), 
+               "Graph degree mismatch: graph has %zu cols, expected %u",
+               static_cast<size_t>(graph.extent(1)), 
+               index_.graph_degree());
+  
   auto host_graph =
     raft::make_host_matrix<IdxT, int64_t, raft::row_major>(graph.extent(0), graph.extent(1));
   raft::copy(host_graph.data_handle(),
@@ -196,20 +236,50 @@ void serialize_to_hnswlib(
   size_t bytes_written = 0;
   float GiB            = 1 << 30;
   for (std::size_t i = 0; i < index_.size(); i++) {
+    // Bounds check before accessing arrays
+    RAFT_EXPECTS(i < host_graph.extent(0), "Graph row index out of bounds: %zu >= %zu", 
+                 i, static_cast<size_t>(host_graph.extent(0)));
+    RAFT_EXPECTS(i < host_dataset_view.extent(0), "Dataset row index out of bounds: %zu >= %zu", 
+                 i, static_cast<size_t>(host_dataset_view.extent(0)));
+    
     auto graph_degree = static_cast<int>(index_.graph_degree());
     os.write(reinterpret_cast<char*>(&graph_degree), sizeof(int));
+    if (!os.good()) { 
+      RAFT_FAIL("Error writing graph degree at row %zu. Stream state: fail=%d, bad=%d, eof=%d", 
+                i, os.fail(), os.bad(), os.eof()); 
+    }
 
     IdxT* graph_row = &host_graph(i, 0);
     os.write(reinterpret_cast<char*>(graph_row), sizeof(IdxT) * index_.graph_degree());
+    if (!os.good()) { 
+      RAFT_FAIL("Error writing graph row %zu (size=%zu bytes). Stream state: fail=%d, bad=%d, eof=%d", 
+                i, sizeof(IdxT) * index_.graph_degree(), os.fail(), os.bad(), os.eof()); 
+    }
 
     const T* data_row = &host_dataset_view(i, 0);
     os.write(reinterpret_cast<const char*>(data_row), sizeof(T) * dim);
+    if (!os.good()) { 
+      RAFT_FAIL("Error writing data row %zu (size=%zu bytes). Stream state: fail=%d, bad=%d, eof=%d", 
+                i, sizeof(T) * dim, os.fail(), os.bad(), os.eof()); 
+    }
+    
     os.write(reinterpret_cast<char*>(&i), sizeof(std::size_t));
+    if (!os.good()) { 
+      RAFT_FAIL("Error writing row index %zu. Stream state: fail=%d, bad=%d, eof=%d, bytes_written=%zu", 
+                i, os.fail(), os.bad(), os.eof(), bytes_written); 
+    }
 
     bytes_written +=
       dim * sizeof(T) + index_.graph_degree() * sizeof(IdxT) + sizeof(int) + sizeof(size_t);
     const auto end_clock = std::chrono::system_clock::now();
-    if (!os.good()) { RAFT_FAIL("Error writing HNSW file, row %zu", i); }
+    
+    // Check for potential memory issues - validate pointers
+    if (graph_row == nullptr) {
+      RAFT_FAIL("Graph row pointer is null at row %zu", i);
+    }
+    if (data_row == nullptr) {
+      RAFT_FAIL("Data row pointer is null at row %zu", i);
+    }
     if (i > next_report_offset) {
       next_report_offset += d_report_offset;
       const auto time =
