@@ -11,6 +11,8 @@
 #include <raft/random/rng_state.hpp>
 #include <rapids_logger/logger.hpp>
 
+#include <optional>
+
 namespace cuvs::cluster::kmeans {
 
 /** Base structure for parameters that are common to all k-means algorithms */
@@ -733,6 +735,28 @@ void fit(const raft::resources& handle,
          cuvs::cluster::kmeans::balanced_params const& params,
          raft::device_matrix_view<const float, int64_t> X,
          raft::device_matrix_view<float, int64_t> centroids);
+
+/**
+ * @brief Find balanced clusters with k-means algorithm and return inertia.
+ *
+ * Same as the overload above but also computes inertia (sum of squared
+ * distances from each sample to its nearest centroid).
+ *
+ * @param[in]     handle        The raft handle.
+ * @param[in]     params        Parameters for KMeans model.
+ * @param[in]     X             Training instances to cluster. The data must
+ *                              be in row-major format.
+ *                              [dim = n_samples x n_features]
+ * @param[out]  centroids       The generated centroids.
+ *                              [dim = n_clusters x n_features]
+ * @param[out]  inertia         Sum of squared distances of samples to their
+ *                              closest cluster center.
+ */
+void fit(const raft::resources& handle,
+         cuvs::cluster::kmeans::balanced_params const& params,
+         raft::device_matrix_view<const float, int64_t> X,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia);
 
 /**
  * @brief Find balanced clusters with k-means algorithm.
@@ -1688,7 +1712,7 @@ void transform(raft::resources const& handle,
                raft::device_matrix_view<double, int> X_new);
 
 /**
- * @brief Compute cluster cost
+ * @brief Compute (optionally weighted) cluster cost
  *
  * @param[in]  handle         The raft handle
  * @param[in]  X              Training instances to cluster. The data must
@@ -1698,15 +1722,19 @@ void transform(raft::resources const& handle,
  *                            row-major format.
  *                            [dim = n_clusters x n_features]
  * @param[out] cost           Resulting cluster cost
+ * @param[in]  sample_weight  Optional per-sample weights.
+ *                            [len = n_samples]
  *
  */
-void cluster_cost(const raft::resources& handle,
-                  raft::device_matrix_view<const float, int> X,
-                  raft::device_matrix_view<const float, int> centroids,
-                  raft::host_scalar_view<float> cost);
+void cluster_cost(
+  const raft::resources& handle,
+  raft::device_matrix_view<const float, int> X,
+  raft::device_matrix_view<const float, int> centroids,
+  raft::host_scalar_view<float> cost,
+  std::optional<raft::device_vector_view<const float, int>> sample_weight = std::nullopt);
 
 /**
- * @brief Compute cluster cost
+ * @brief Compute (optionally weighted) cluster cost
  *
  * @param[in]  handle         The raft handle
  * @param[in]  X              Training instances to cluster. The data must
@@ -1716,12 +1744,16 @@ void cluster_cost(const raft::resources& handle,
  *                            row-major format.
  *                            [dim = n_clusters x n_features]
  * @param[out] cost           Resulting cluster cost
+ * @param[in]  sample_weight  Optional per-sample weights.
+ *                            [len = n_samples]
  *
  */
-void cluster_cost(const raft::resources& handle,
-                  raft::device_matrix_view<const double, int> X,
-                  raft::device_matrix_view<const double, int> centroids,
-                  raft::host_scalar_view<double> cost);
+void cluster_cost(
+  const raft::resources& handle,
+  raft::device_matrix_view<const double, int> X,
+  raft::device_matrix_view<const double, int> centroids,
+  raft::host_scalar_view<double> cost,
+  std::optional<raft::device_vector_view<const double, int>> sample_weight = std::nullopt);
 
 /**
  * @}

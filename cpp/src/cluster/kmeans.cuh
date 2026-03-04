@@ -15,7 +15,6 @@
 #include <raft/core/operators.hpp>
 #include <raft/core/resource/comms.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
-#include <raft/linalg/norm.cuh>
 
 #include <optional>
 
@@ -405,48 +404,14 @@ void min_cluster_distance(raft::resources const& handle,
 }
 
 template <typename DataT, typename IndexT>
-void cluster_cost(raft::resources const& handle,
-                  raft::device_matrix_view<const DataT, IndexT> X,
-                  raft::device_matrix_view<const DataT, IndexT> centroids,
-                  raft::host_scalar_view<DataT> cost)
+void cluster_cost(
+  raft::resources const& handle,
+  raft::device_matrix_view<const DataT, IndexT> X,
+  raft::device_matrix_view<const DataT, IndexT> centroids,
+  raft::host_scalar_view<DataT> cost,
+  std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight = std::nullopt)
 {
-  auto stream = raft::resource::get_cuda_stream(handle);
-
-  auto n_clusters = centroids.extent(0);
-  auto n_samples  = X.extent(0);
-  auto n_features = X.extent(1);
-
-  rmm::device_uvector<char> workspace(n_samples * sizeof(IndexT), stream);
-
-  auto x_norms = raft::make_device_vector<DataT>(handle, n_samples);
-
-  raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(handle, X, x_norms.view());
-
-  auto min_cluster_distance = raft::make_device_vector<DataT>(handle, n_samples);
-  rmm::device_uvector<DataT> l2_norm_or_distance_buffer(0, stream);
-
-  auto metric = cuvs::distance::DistanceType::L2Expanded;
-
-  cuvs::cluster::kmeans::min_cluster_distance<DataT, IndexT>(
-    handle,
-    X,
-    raft::make_device_matrix_view<DataT, IndexT>(
-      const_cast<DataT*>(centroids.data_handle()), n_clusters, n_features),
-    min_cluster_distance.view(),
-    x_norms.view(),
-    l2_norm_or_distance_buffer,
-    metric,
-    n_samples,
-    n_clusters,
-    workspace);
-
-  auto device_cost = raft::make_device_scalar<DataT>(handle, DataT(0));
-
-  cuvs::cluster::kmeans::cluster_cost(
-    handle, min_cluster_distance.view(), workspace, device_cost.view(), raft::add_op{});
-  raft::copy(handle, cost, raft::make_const_mdspan(device_cost.view()));
-
-  raft::resource::sync_stream(handle);
+  cuvs::cluster::kmeans::detail::cluster_cost(handle, X, centroids, cost, sample_weight);
 }
 
 /**

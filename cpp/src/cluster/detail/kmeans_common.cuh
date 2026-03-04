@@ -603,77 +603,168 @@ DataT compute_centroid_shift(raft::resources const& handle,
 }
 
 /**
- * @brief Compute (optionally weighted) inertia for device-resident data.
+ * @brief Compute (optionally weighted) cluster cost for device-resident data.
  *
  * Computes the sum of (optionally weighted) squared distances from each sample
  * to its nearest centroid.  Used for final inertia reporting after training and
  * for scoring validation sets during n_init selection.
+ *
+ * When T != MathT a mapping functor is applied to convert each element of X
+ * to MathT before computing distances.  To keep peak memory bounded the
+ * conversion is done in batches.
+ *
+ * @tparam T          Element type of the input data (may differ from MathT).
+ * @tparam MathT      Arithmetic type (centroids, cost, distances).
+ * @tparam IndexT     Index type.
+ * @tparam MappingOpT Functor mapping T -> MathT (default: identity_op).
+ *
+ * @param[in]  handle         The raft handle
+ * @param[in]  X              Input data [n_samples x n_features]
+ * @param[in]  centroids      Cluster centroids [n_clusters x n_features]
+ * @param[out] cost           Resulting cluster cost (host scalar)
+ * @param[in]  sample_weight  Optional per-sample weights [n_samples]
+ * @param[in]  mapping_op     Functor to convert T -> MathT elements
  */
-template <typename DataT, typename IndexT>
-DataT compute_inertia(
+template <typename T,
+          typename MathT,
+          typename IndexT,
+          typename MappingOpT = raft::identity_op>
+void cluster_cost(
   raft::resources const& handle,
-  const cuvs::cluster::kmeans::params& params,
-  raft::device_matrix_view<const DataT, IndexT> X,
-  raft::device_matrix_view<const DataT, IndexT> centroids,
-  rmm::device_uvector<char>& workspace,
-  std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight = std::nullopt)
+  raft::device_matrix_view<const T, IndexT> X,
+  raft::device_matrix_view<const MathT, IndexT> centroids,
+  raft::host_scalar_view<MathT> cost,
+  std::optional<raft::device_vector_view<const MathT, IndexT>> sample_weight = std::nullopt,
+  [[maybe_unused]] MappingOpT mapping_op                                     = MappingOpT{})
 {
   cudaStream_t stream = raft::resource::get_cuda_stream(handle);
   auto n_samples      = X.extent(0);
   auto n_features     = X.extent(1);
-  auto metric         = params.metric;
+  auto n_clusters     = centroids.extent(0);
+  auto metric         = cuvs::distance::DistanceType::L2Expanded;
 
-  auto minClusterAndDistance =
-    raft::make_device_vector<raft::KeyValuePair<IndexT, DataT>, IndexT>(handle, n_samples);
-  auto L2NormX = raft::make_device_vector<DataT, IndexT>(handle, n_samples);
-  rmm::device_uvector<DataT> L2NormBuf(0, stream);
-  rmm::device_scalar<DataT> cost(stream);
+  if constexpr (std::is_same_v<T, MathT>) {
+    // ---- Fast path: T == MathT, no data conversion ----
 
-  if (metric == cuvs::distance::DistanceType::L2Expanded ||
-      metric == cuvs::distance::DistanceType::L2SqrtExpanded) {
+    rmm::device_uvector<char> workspace(n_samples * sizeof(IndexT), stream);
+
+    auto L2NormX = raft::make_device_vector<MathT, IndexT>(handle, n_samples);
     raft::linalg::rowNorm<raft::linalg::L2Norm, true>(
       L2NormX.data_handle(), X.data_handle(), n_features, n_samples, stream);
-  }
 
-  auto mcd_view = minClusterAndDistance.view();
+    auto minClusterDistance = raft::make_device_vector<MathT, IndexT>(handle, n_samples);
+    rmm::device_uvector<MathT> L2NormBuf(0, stream);
 
-  cuvs::cluster::kmeans::detail::minClusterAndDistanceCompute<DataT, IndexT>(
-    handle,
-    X,
-    centroids,
-    mcd_view,
-    raft::make_device_vector_view<const DataT, IndexT>(L2NormX.data_handle(), n_samples),
-    L2NormBuf,
-    metric,
-    params.batch_samples,
-    params.batch_centroids,
-    workspace);
-
-  if (sample_weight) {
-    raft::linalg::map(
+    cuvs::cluster::kmeans::detail::minClusterDistanceCompute<MathT, IndexT>(
       handle,
-      mcd_view,
-      [=] __device__(const raft::KeyValuePair<IndexT, DataT> kvp, DataT wt) {
-        raft::KeyValuePair<IndexT, DataT> res;
-        res.value = kvp.value * wt;
-        res.key   = kvp.key;
-        return res;
-      },
-      raft::make_const_mdspan(mcd_view),
-      *sample_weight);
+      X,
+      raft::make_device_matrix_view<MathT, IndexT>(
+        const_cast<MathT*>(centroids.data_handle()), n_clusters, n_features),
+      minClusterDistance.view(),
+      L2NormX.view(),
+      L2NormBuf,
+      metric,
+      n_samples,
+      n_clusters,
+      workspace);
+
+    if (sample_weight) {
+      raft::linalg::map(
+        handle,
+        minClusterDistance.view(),
+        [] __device__(MathT dist, MathT wt) { return dist * wt; },
+        raft::make_const_mdspan(minClusterDistance.view()),
+        *sample_weight);
+    }
+
+    rmm::device_scalar<MathT> device_cost(stream);
+
+    cuvs::cluster::kmeans::detail::computeClusterCost(
+      handle,
+      minClusterDistance.view(),
+      workspace,
+      raft::make_device_scalar_view(device_cost.data()),
+      raft::identity_op{},
+      raft::add_op{});
+
+    raft::copy(&cost[0], device_cost.data(), 1, stream);
+    raft::resource::sync_stream(handle, stream);
+
+  } else {
+    // ---- Slow path: T != MathT, map in batches ----
+
+    const IndexT batch_max = std::min(n_samples, IndexT(1 << 20));
+
+    auto mapped_buf         = raft::make_device_matrix<MathT, IndexT>(handle, batch_max, n_features);
+    auto L2NormX            = raft::make_device_vector<MathT, IndexT>(handle, batch_max);
+    auto minClusterDistance = raft::make_device_vector<MathT, IndexT>(handle, batch_max);
+    rmm::device_uvector<char> workspace(batch_max * sizeof(IndexT), stream);
+    rmm::device_uvector<MathT> L2NormBuf(0, stream);
+
+    MathT total_cost = MathT(0);
+
+    for (IndexT offset = 0; offset < n_samples; offset += batch_max) {
+      IndexT cur = std::min(batch_max, static_cast<IndexT>(n_samples - offset));
+
+      // Map T -> MathT for this batch
+      auto src = raft::make_device_matrix_view<const T, IndexT>(
+        X.data_handle() + static_cast<int64_t>(offset) * n_features, cur, n_features);
+      auto dst = raft::make_device_matrix_view<MathT, IndexT>(
+        mapped_buf.data_handle(), cur, n_features);
+      raft::linalg::map(handle, dst, mapping_op, src);
+
+      auto batch_view = raft::make_device_matrix_view<const MathT, IndexT>(
+        mapped_buf.data_handle(), cur, n_features);
+
+      raft::linalg::rowNorm<raft::linalg::L2Norm, true>(
+        L2NormX.data_handle(), mapped_buf.data_handle(), n_features, cur, stream);
+
+      auto minDist_view =
+        raft::make_device_vector_view<MathT, IndexT>(minClusterDistance.data_handle(), cur);
+      auto L2Norm_view =
+        raft::make_device_vector_view<MathT, IndexT>(L2NormX.data_handle(), cur);
+
+      cuvs::cluster::kmeans::detail::minClusterDistanceCompute<MathT, IndexT>(
+        handle,
+        batch_view,
+        raft::make_device_matrix_view<MathT, IndexT>(
+          const_cast<MathT*>(centroids.data_handle()), n_clusters, n_features),
+        minDist_view,
+        L2Norm_view,
+        L2NormBuf,
+        metric,
+        cur,
+        n_clusters,
+        workspace);
+
+      if (sample_weight) {
+        auto wt_slice = raft::make_device_vector_view<const MathT, IndexT>(
+          sample_weight->data_handle() + offset, cur);
+        raft::linalg::map(
+          handle,
+          minDist_view,
+          [] __device__(MathT d, MathT w) { return d * w; },
+          raft::make_const_mdspan(minDist_view),
+          wt_slice);
+      }
+
+      rmm::device_scalar<MathT> batch_cost(stream);
+      cuvs::cluster::kmeans::detail::computeClusterCost(
+        handle,
+        minDist_view,
+        workspace,
+        raft::make_device_scalar_view(batch_cost.data()),
+        raft::identity_op{},
+        raft::add_op{});
+
+      MathT h = MathT(0);
+      raft::copy(&h, batch_cost.data(), 1, stream);
+      raft::resource::sync_stream(handle, stream);
+      total_cost += h;
+    }
+
+    cost[0] = total_cost;
   }
-
-  cuvs::cluster::kmeans::detail::computeClusterCost(handle,
-                                                    mcd_view,
-                                                    workspace,
-                                                    raft::make_device_scalar_view(cost.data()),
-                                                    raft::value_op{},
-                                                    raft::add_op{});
-
-  DataT result = 0;
-  raft::copy(&result, cost.data(), 1, stream);
-  raft::resource::sync_stream(handle, stream);
-  return result;
 }
 
 }  // namespace cuvs::cluster::kmeans::detail

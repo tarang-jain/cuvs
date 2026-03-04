@@ -67,7 +67,8 @@ void fit(const raft::resources& handle,
          cuvs::cluster::kmeans::balanced_params const& params,
          raft::device_matrix_view<const DataT, IndexT> X,
          raft::device_matrix_view<MathT, IndexT> centroids,
-         MappingOpT mapping_op = raft::identity_op())
+         MappingOpT mapping_op              = raft::identity_op(),
+         raft::host_scalar_view<MathT>* inertia = nullptr)
 {
   RAFT_EXPECTS(X.extent(1) == centroids.extent(1),
                "Number of features in dataset and centroids are different");
@@ -85,7 +86,9 @@ void fit(const raft::resources& handle,
                                                     X.extent(0),
                                                     centroids.data_handle(),
                                                     centroids.extent(0),
-                                                    mapping_op);
+                                                    mapping_op,
+                                                    nullptr,
+                                                    inertia);
 }
 
 /**
