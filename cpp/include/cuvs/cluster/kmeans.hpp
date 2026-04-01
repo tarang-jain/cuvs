@@ -387,11 +387,33 @@ void fit(raft::resources const& handle,
  */
 void fit(raft::resources const& handle,
          const cuvs::cluster::kmeans::params& params,
-         raft::device_matrix_view<const int8_t, int> X,
-         std::optional<raft::device_vector_view<const int8_t, int>> sample_weight,
-         raft::device_matrix_view<int8_t, int> centroids,
-         raft::host_scalar_view<int8_t> inertia,
-         raft::host_scalar_view<int> n_iter);
+         raft::device_matrix_view<const int8_t, int64_t> X,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/**
+ * @brief Find clusters with k-means algorithm for uint8 data.
+ *
+ * Input data is uint8, but centroids and inertia are float since centroids
+ * are averages. Internally the data is converted to float for all
+ * distance and centroid computations.
+ *
+ * @param[in]     handle        The raft handle.
+ * @param[in]     params        Parameters for KMeans model.
+ * @param[in]     X             Training instances to cluster (uint8).
+ *                              [dim = n_samples x n_features]
+ * @param[inout]  centroids     Cluster centers (float).
+ *                              [dim = n_clusters x n_features]
+ * @param[out]    inertia       Sum of squared distances (float).
+ * @param[out]    n_iter        Number of iterations run.
+ */
+void fit(raft::resources const& handle,
+         const cuvs::cluster::kmeans::params& params,
+         raft::device_matrix_view<const uint8_t, int64_t> X,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
 
 /**
  * @brief Find balanced clusters with k-means algorithm.
@@ -607,6 +629,32 @@ void predict(raft::resources const& handle,
              raft::device_matrix_view<const float, int64_t> centroids,
              raft::device_vector_view<int64_t, int64_t> labels,
              bool normalize_weight,
+             raft::host_scalar_view<float> inertia);
+
+/**
+ * @brief Predict the closest cluster for int8 data.
+ *
+ * Input data is int8, centroids are float. Data is converted to float
+ * internally for distance computations.
+ */
+void predict(raft::resources const& handle,
+             const kmeans::params& params,
+             raft::device_matrix_view<const int8_t, int64_t> X,
+             raft::device_matrix_view<const float, int64_t> centroids,
+             raft::device_vector_view<int64_t, int64_t> labels,
+             raft::host_scalar_view<float> inertia);
+
+/**
+ * @brief Predict the closest cluster for uint8 data.
+ *
+ * Input data is uint8, centroids are float. Data is converted to float
+ * internally for distance computations.
+ */
+void predict(raft::resources const& handle,
+             const kmeans::params& params,
+             raft::device_matrix_view<const uint8_t, int64_t> X,
+             raft::device_matrix_view<const float, int64_t> centroids,
+             raft::device_vector_view<int64_t, int64_t> labels,
              raft::host_scalar_view<float> inertia);
 
 /**
