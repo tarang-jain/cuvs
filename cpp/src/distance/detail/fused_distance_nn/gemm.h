@@ -38,12 +38,16 @@
 #pragma once
 
 #include "epilogue.cuh"
+#include "mapped_predicated_tile_iterator.h"
 #include "persistent_gemm.h"
 
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/kernel/default_gemm_universal.h>
+#include <cutlass/gemm/threadblock/default_mma_core.h>
+#include <cutlass/gemm/threadblock/mma_pipelined.h>
 #include <cutlass/layout/matrix.h>
 #include <cutlass/layout/tensor.h>
+#include <cutlass/transform/threadblock/predicated_tile_iterator.h>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -291,6 +295,120 @@ struct FusedDistanceNNGemm<float,  /// Element type for A matrix operand
                                                ThreadblockSwizzle,
                                                GroupScheduleMode::kDeviceOnly>;
 };
+
+template <typename RawElementA_,
+          int kAlignmentA,
+          int kAlignmentB,
+          typename EpilogueOutputOp,
+          int Stages,
+          bool isRowMajor>
+struct FusedDistanceNNGemmMappedInputFloat {
+  using ElementA_          = float;
+  using ElementB_          = float;
+  using ElementC_          = float;
+  using ElementAccumulator = float;
+  using ThreadblockShape   = cutlass::gemm::GemmShape<32, 128, 16>;
+  using WarpShape          = cutlass::gemm::GemmShape<32, 32, 16>;
+  using InstructionShape   = cutlass::gemm::GemmShape<16, 8, 4>;
+  using Operator           = cutlass::arch::OpMultiplyAddFastF32;
+  using OperatorClass      = cutlass::arch::OpClassTensorOp;
+  using ArchTag            = cutlass::arch::Sm80;
+  using ThreadblockSwizzle = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>;
+  using LayoutOutput       = cutlass::layout::RowMajor;
+  using NormXLayout        = typename std::
+    conditional<isRowMajor, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>::type;
+  using LayoutA_ = typename std::
+    conditional<isRowMajor, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>::type;
+  using LayoutB_ = typename std::
+    conditional<isRowMajor, cutlass::layout::ColumnMajor, cutlass::layout::RowMajor>::type;
+
+  using MmaCore = typename cutlass::gemm::threadblock::DefaultMmaCore<ThreadblockShape,
+                                                                      WarpShape,
+                                                                      InstructionShape,
+                                                                      float,
+                                                                      LayoutA_,
+                                                                      float,
+                                                                      LayoutB_,
+                                                                      float,
+                                                                      LayoutOutput,
+                                                                      OperatorClass,
+                                                                      2,
+                                                                      Operator>;
+
+  using IteratorA = cuvs::distance::detail::MappedPredicatedTileIterator<
+    RawElementA_,
+    cutlass::MatrixShape<MmaCore::Shape::kM, MmaCore::Shape::kK>,
+    float,
+    LayoutA_,
+    1,
+    typename MmaCore::IteratorThreadMapA,
+    kAlignmentA>;
+
+  using IteratorB = cutlass::transform::threadblock::PredicatedTileIterator<
+    cutlass::MatrixShape<MmaCore::Shape::kK, MmaCore::Shape::kN>,
+    float,
+    LayoutB_,
+    0,
+    typename MmaCore::IteratorThreadMapB,
+    kAlignmentB>;
+
+  using Mma = cutlass::gemm::threadblock::MmaPipelined<typename MmaCore::Shape,
+                                                       IteratorA,
+                                                       typename MmaCore::SmemIteratorA,
+                                                       IteratorB,
+                                                       typename MmaCore::SmemIteratorB,
+                                                       float,
+                                                       LayoutOutput,
+                                                       typename MmaCore::MmaPolicy>;
+
+  static const int kPartitionsK = ThreadblockShape::kK / WarpShape::kK;
+
+  using Epilogue = typename cuvs::epilogue::threadblock::FusedDistanceNNEpilogue<
+    ThreadblockShape,
+    typename Mma::Operator,
+    kPartitionsK,
+    float,
+    typename EpilogueOutputOp::ElementT,
+    float,
+    EpilogueOutputOp,
+    NormXLayout,
+    1>::Epilogue;
+
+  using GemmKernel =
+    FusedDistanceNNPersistent<Mma, Epilogue, ThreadblockSwizzle, GroupScheduleMode::kDeviceOnly>;
+};
+
+template <int kAlignmentA, int kAlignmentB, typename EpilogueOutputOp, int Stages, bool isRowMajor>
+struct FusedDistanceNNGemm<int8_t,
+                           kAlignmentA,
+                           float,
+                           kAlignmentB,
+                           float,
+                           float,
+                           EpilogueOutputOp,
+                           Stages,
+                           isRowMajor> : FusedDistanceNNGemmMappedInputFloat<int8_t,
+                                                                             kAlignmentA,
+                                                                             kAlignmentB,
+                                                                             EpilogueOutputOp,
+                                                                             Stages,
+                                                                             isRowMajor> {};
+
+template <int kAlignmentA, int kAlignmentB, typename EpilogueOutputOp, int Stages, bool isRowMajor>
+struct FusedDistanceNNGemm<uint8_t,
+                           kAlignmentA,
+                           float,
+                           kAlignmentB,
+                           float,
+                           float,
+                           EpilogueOutputOp,
+                           Stages,
+                           isRowMajor> : FusedDistanceNNGemmMappedInputFloat<uint8_t,
+                                                                             kAlignmentA,
+                                                                             kAlignmentB,
+                                                                             EpilogueOutputOp,
+                                                                             Stages,
+                                                                             isRowMajor> {};
 
 template <
   /// Layout type for A matrix operand

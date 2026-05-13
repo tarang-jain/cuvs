@@ -241,6 +241,84 @@ void fusedDistanceNN(OutT* min,
   }
 }
 
+template <typename InputT,
+          typename MathT,
+          typename OutT,
+          typename IdxT,
+          typename ReduceOpT,
+          typename KVPReduceOpT>
+void fusedDistanceNNMapped(OutT* min,
+                           const InputT* x,
+                           const MathT* y,
+                           const MathT* xn,
+                           const MathT* yn,
+                           IdxT m,
+                           IdxT n,
+                           IdxT k,
+                           void* workspace,
+                           ReduceOpT redOp,
+                           KVPReduceOpT pairRedOp,
+                           bool sqrt,
+                           bool initOutBuffer,
+                           bool isRowMajor,
+                           cuvs::distance::DistanceType metric,
+                           float metric_arg,
+                           cudaStream_t stream)
+{
+  ASSERT(isRowMajor, "fusedDistanceNNMapped only supports row major inputs");
+  ASSERT(metric == cuvs::distance::DistanceType::L2Expanded ||
+           metric == cuvs::distance::DistanceType::L2SqrtExpanded,
+         "fusedDistanceNNMapped only supports L2Expanded/L2SqrtExpanded");
+  static_assert(std::is_same_v<MathT, float>,
+                "fusedDistanceNNMapped currently supports float math only");
+  static_assert(std::is_same_v<InputT, int8_t> || std::is_same_v<InputT, uint8_t>,
+                "fusedDistanceNNMapped currently supports int8_t/uint8_t input only");
+
+  (void)metric_arg;
+  bool is_skinny = k < 32;
+  if (is_skinny) {
+    detail::fusedL2NNMappedImpl<InputT,
+                                MathT,
+                                OutT,
+                                IdxT,
+                                typename raft::linalg::Policy4x4Skinny<MathT, 1>::Policy,
+                                ReduceOpT>(min,
+                                           x,
+                                           y,
+                                           xn,
+                                           yn,
+                                           m,
+                                           n,
+                                           k,
+                                           static_cast<int*>(workspace),
+                                           redOp,
+                                           pairRedOp,
+                                           sqrt,
+                                           initOutBuffer,
+                                           stream);
+  } else {
+    detail::fusedL2NNMappedImpl<InputT,
+                                MathT,
+                                OutT,
+                                IdxT,
+                                typename raft::linalg::Policy4x4<MathT, 1>::Policy,
+                                ReduceOpT>(min,
+                                           x,
+                                           y,
+                                           xn,
+                                           yn,
+                                           m,
+                                           n,
+                                           k,
+                                           static_cast<int*>(workspace),
+                                           redOp,
+                                           pairRedOp,
+                                           sqrt,
+                                           initOutBuffer,
+                                           stream);
+  }
+}
+
 /**
  * @brief Wrapper around fusedDistanceNN with minimum reduction operators.
  *
@@ -309,6 +387,45 @@ void fusedDistanceNNMinReduce(OutT* min,
                                      metric,
                                      metric_arg,
                                      stream);
+}
+
+template <typename InputT, typename MathT, typename OutT, typename IdxT>
+void fusedDistanceNNMinReduceMapped(OutT* min,
+                                    const InputT* x,
+                                    const MathT* y,
+                                    const MathT* xn,
+                                    const MathT* yn,
+                                    IdxT m,
+                                    IdxT n,
+                                    IdxT k,
+                                    void* workspace,
+                                    bool sqrt,
+                                    bool initOutBuffer,
+                                    bool isRowMajor,
+                                    cuvs::distance::DistanceType metric,
+                                    float metric_arg,
+                                    cudaStream_t stream)
+{
+  MinAndDistanceReduceOp<IdxT, MathT> redOp;
+  KVPMinReduce<IdxT, MathT> pairRedOp;
+
+  fusedDistanceNNMapped<InputT, MathT, OutT, IdxT>(min,
+                                                   x,
+                                                   y,
+                                                   xn,
+                                                   yn,
+                                                   m,
+                                                   n,
+                                                   k,
+                                                   workspace,
+                                                   redOp,
+                                                   pairRedOp,
+                                                   sqrt,
+                                                   initOutBuffer,
+                                                   isRowMajor,
+                                                   metric,
+                                                   metric_arg,
+                                                   stream);
 }
 
 /** @} */

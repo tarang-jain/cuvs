@@ -139,3 +139,44 @@ def test_fit_host_matches_fit_device(
     assert np.allclose(
         inertia_regular, inertia_batched, rtol=1e-3, atol=1e-3
     ), f"max diff: {np.max(np.abs(inertia_regular - inertia_batched))}"
+
+
+@pytest.mark.parametrize(
+    "dtype,scale", [(np.int8, 1.0 / 128.0), (np.uint8, 1.0 / 256.0)]
+)
+def test_fit_host_quantized(dtype, scale):
+    X_host = np.asarray(
+        [
+            [1, 1],
+            [1, 2],
+            [2, 1],
+            [2, 2],
+            [10, 10],
+            [10, 11],
+            [11, 10],
+            [11, 11],
+        ],
+        dtype=dtype,
+    )
+    init = np.asarray([[0, 0], [12, 12]], dtype=np.float32) * scale
+    expected = np.asarray([[1.5, 1.5], [10.5, 10.5]], dtype=np.float32)
+    expected *= scale
+    sample_weights = np.ones(X_host.shape[0], dtype=np.float32)
+
+    params = KMeansParams(
+        n_clusters=2,
+        init_method="Array",
+        max_iter=20,
+        tol=1e-6,
+        streaming_batch_size=3,
+    )
+    centroids, inertia, n_iter = fit(
+        params,
+        X_host,
+        centroids=device_ndarray(init.copy()),
+        sample_weights=sample_weights,
+    )
+
+    assert n_iter >= 1
+    assert np.allclose(centroids.copy_to_host(), expected, rtol=1e-4, atol=1e-4)
+    assert np.allclose(inertia, 4.0 * scale * scale, rtol=1e-4, atol=1e-6)

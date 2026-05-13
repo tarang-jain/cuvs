@@ -11,6 +11,7 @@
 #include <raft/random/rng_state.hpp>
 #include <rapids_logger/logger.hpp>
 
+#include <cstdint>
 #include <cuvs/core/export.hpp>
 #include <optional>
 
@@ -243,6 +244,34 @@ void fit(raft::resources const& handle,
          std::optional<raft::host_vector_view<const double, int64_t>> sample_weight,
          raft::device_matrix_view<double, int64_t> centroids,
          raft::host_scalar_view<double> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/**
+ * @brief Find clusters with k-means algorithm using batched processing of host int8 data.
+ *
+ * Integer inputs are converted to float during streaming; sample weights, centroids, and inertia
+ * use float.
+ */
+void fit(raft::resources const& handle,
+         const cuvs::cluster::kmeans::params& params,
+         raft::host_matrix_view<const int8_t, int64_t> X,
+         std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/**
+ * @brief Find clusters with k-means algorithm using batched processing of host uint8 data.
+ *
+ * Integer inputs are converted to float during streaming; sample weights, centroids, and inertia
+ * use float.
+ */
+void fit(raft::resources const& handle,
+         const cuvs::cluster::kmeans::params& params,
+         raft::host_matrix_view<const uint8_t, int64_t> X,
+         std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
          raft::host_scalar_view<int64_t> n_iter);
 
 /**

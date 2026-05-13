@@ -820,6 +820,8 @@ if(NOT BUILD_CPU_ONLY)
     src/cluster/kmeans_fit_mg_double.cu
     src/cluster/kmeans_fit_double.cu
     src/cluster/kmeans_fit_float.cu
+    src/cluster/kmeans_fit_int8.cu
+    src/cluster/kmeans_fit_uint8.cu
     src/cluster/kmeans_auto_find_k_float.cu
     src/cluster/kmeans_fit_predict_double.cu
     src/cluster/kmeans_fit_predict_float.cu

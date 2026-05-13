@@ -51,6 +51,7 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <type_traits>
 
 namespace cuvs::cluster::kmeans::detail {
 
@@ -552,17 +553,18 @@ void initScalableKMeansPlusPlus(raft::resources const& handle,
  * @param[out]    n_iter        Number of iterations run for the best
  *                              initialization.
  */
-template <typename DataT, typename IndexT, typename Accessor>
+template <typename DataT, typename MathT, typename MappingOpT, typename IndexT, typename Accessor>
 void kmeans_fit(
   raft::resources const& handle,
   const cuvs::cluster::kmeans::params& pams,
   raft::mdspan<const DataT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
   std::optional<
-    raft::mdspan<const DataT, raft::vector_extent<IndexT>, raft::layout_right, Accessor>>
+    raft::mdspan<const MathT, raft::vector_extent<IndexT>, raft::layout_right, Accessor>>
     sample_weight,
-  raft::device_matrix_view<DataT, IndexT> centroids,
-  raft::host_scalar_view<DataT> inertia,
+  raft::device_matrix_view<MathT, IndexT> centroids,
+  raft::host_scalar_view<MathT> inertia,
   raft::host_scalar_view<IndexT> n_iter,
+  MappingOpT mapping_op,
   std::optional<std::reference_wrapper<rmm::device_uvector<char>>> workspace)
 {
   RAFT_EXPECTS(pams.metric == cuvs::distance::DistanceType::L2Expanded ||
@@ -595,10 +597,14 @@ void kmeans_fit(
 
   constexpr bool data_on_device = raft::is_device_mdspan_v<decltype(X)>;
 
-  const DataT* weight_ptr =
+  if constexpr (data_on_device && !std::is_same_v<DataT, MathT>) {
+    RAFT_FAIL("mapped kmeans input is only supported for host streaming data");
+  }
+
+  const MathT* weight_ptr =
     sample_weight.has_value() ? sample_weight.value().data_handle() : nullptr;
 
-  auto d_wt_sum = raft::make_device_scalar<DataT>(handle, static_cast<DataT>(n_samples));
+  auto d_wt_sum = raft::make_device_scalar<MathT>(handle, static_cast<MathT>(n_samples));
   if (sample_weight.has_value()) { weightSum(handle, sample_weight.value(), d_wt_sum.view()); }
 
   rmm::device_uvector<char> local_workspace(0, stream);
@@ -614,7 +620,8 @@ void kmeans_fit(
   }
 
   // Preallocate the host-side KMeans++ init sample buffer.
-  std::optional<raft::device_matrix<DataT, IndexT>> init_sample;
+  std::optional<raft::device_matrix<DataT, IndexT>> init_sample_input;
+  std::optional<raft::device_matrix<MathT, IndexT>> init_sample_mapped;
   if constexpr (!data_on_device) {
     if (pams.init == cuvs::cluster::kmeans::params::InitMethod::KMeansPlusPlus) {
       IndexT default_init_size =
@@ -632,12 +639,17 @@ void kmeans_fit(
           static_cast<size_t>(n_samples));
       }
 
-      init_sample = raft::make_device_matrix<DataT, IndexT>(handle, init_sample_size, n_features);
+      init_sample_input =
+        raft::make_device_matrix<DataT, IndexT>(handle, init_sample_size, n_features);
+      if constexpr (!std::is_same_v<DataT, MathT>) {
+        init_sample_mapped =
+          raft::make_device_matrix<MathT, IndexT>(handle, init_sample_size, n_features);
+      }
     }
   }
 
   auto init_centroids = [&](const cuvs::cluster::kmeans::params& iter_params,
-                            raft::device_matrix_view<DataT, IndexT> centroidsRawData) {
+                            raft::device_matrix_view<MathT, IndexT> centroidsRawData) {
     if (iter_params.init == cuvs::cluster::kmeans::params::InitMethod::Array) {
       raft::copy(handle, centroidsRawData, centroids);
       return;
@@ -646,21 +658,42 @@ void kmeans_fit(
     raft::random::RngState random_state(iter_params.rng_state.seed);
 
     if (iter_params.init == cuvs::cluster::kmeans::params::InitMethod::Random) {
-      raft::matrix::sample_rows(handle, random_state, X, centroidsRawData);
+      if constexpr (std::is_same_v<DataT, MathT>) {
+        raft::matrix::sample_rows(handle, random_state, X, centroidsRawData);
+      } else {
+        auto random_rows = raft::make_device_matrix<DataT, IndexT>(handle, n_clusters, n_features);
+        raft::matrix::sample_rows(handle, random_state, X, random_rows.view());
+        auto random_rows_view = raft::make_device_matrix_view<const DataT, IndexT>(
+          random_rows.data_handle(), n_clusters, n_features);
+        raft::linalg::map(
+          handle, centroidsRawData, mapping_op, raft::make_const_mdspan(random_rows_view));
+      }
     } else if (iter_params.init == cuvs::cluster::kmeans::params::InitMethod::KMeansPlusPlus) {
-      auto run_kmeanspp = [&](raft::device_matrix_view<const DataT, IndexT> init_data) {
+      auto run_kmeanspp = [&](raft::device_matrix_view<const MathT, IndexT> init_data) {
         if (iter_params.oversampling_factor == 0)
-          kmeansPlusPlus<DataT, IndexT>(handle, iter_params, init_data, centroidsRawData, ws);
+          kmeansPlusPlus<MathT, IndexT>(handle, iter_params, init_data, centroidsRawData, ws);
         else
-          initScalableKMeansPlusPlus<DataT, IndexT>(
+          initScalableKMeansPlusPlus<MathT, IndexT>(
             handle, iter_params, init_data, centroidsRawData, ws);
       };
 
       if constexpr (data_on_device) {
-        run_kmeanspp(X);
+        if constexpr (std::is_same_v<DataT, MathT>) { run_kmeanspp(X); }
       } else {
-        raft::matrix::sample_rows(handle, random_state, X, init_sample->view());
-        run_kmeanspp(raft::make_const_mdspan(init_sample->view()));
+        raft::matrix::sample_rows(handle, random_state, X, init_sample_input->view());
+        if constexpr (std::is_same_v<DataT, MathT>) {
+          auto init_sample_view = raft::make_device_matrix_view<const MathT, IndexT>(
+            init_sample_input->data_handle(), init_sample_input->extent(0), n_features);
+          run_kmeanspp(init_sample_view);
+        } else {
+          auto init_sample_input_view = raft::make_device_matrix_view<const DataT, IndexT>(
+            init_sample_input->data_handle(), init_sample_input->extent(0), n_features);
+          raft::linalg::map(handle,
+                            init_sample_mapped->view(),
+                            mapping_op,
+                            raft::make_const_mdspan(init_sample_input_view));
+          run_kmeanspp(raft::make_const_mdspan(init_sample_mapped->view()));
+        }
       }
     } else {
       THROW("unknown initialization method to select initial centers");
@@ -677,20 +710,20 @@ void kmeans_fit(
   }
 
   IndexT centroid_buf_size = n_clusters * n_features;
-  rmm::device_uvector<DataT> cur_centroids_buf(centroid_buf_size, stream);
-  rmm::device_uvector<DataT> new_centroids_buf(centroid_buf_size, stream);
-  DataT* cur_centroids_ptr = cur_centroids_buf.data();
-  DataT* new_centroids_ptr = new_centroids_buf.data();
+  rmm::device_uvector<MathT> cur_centroids_buf(centroid_buf_size, stream);
+  rmm::device_uvector<MathT> new_centroids_buf(centroid_buf_size, stream);
+  MathT* cur_centroids_ptr = cur_centroids_buf.data();
+  MathT* new_centroids_ptr = new_centroids_buf.data();
 
-  auto minClusterAndDistance = raft::make_device_vector<raft::KeyValuePair<IndexT, DataT>, IndexT>(
+  auto minClusterAndDistance = raft::make_device_vector<raft::KeyValuePair<IndexT, MathT>, IndexT>(
     handle, streaming_batch_size);
-  auto L2NormBatch       = raft::make_device_vector<DataT, IndexT>(handle, streaming_batch_size);
-  auto batch_weights_buf = raft::make_device_vector<DataT, IndexT>(handle, streaming_batch_size);
-  rmm::device_uvector<DataT> L2NormBuf_OR_DistBuf(0, stream);
+  auto L2NormBatch       = raft::make_device_vector<MathT, IndexT>(handle, streaming_batch_size);
+  auto batch_weights_buf = raft::make_device_vector<MathT, IndexT>(handle, streaming_batch_size);
+  rmm::device_uvector<MathT> L2NormBuf_OR_DistBuf(0, stream);
 
-  auto centroid_sums      = raft::make_device_matrix<DataT, IndexT>(handle, n_clusters, n_features);
-  auto weight_per_cluster = raft::make_device_vector<DataT, IndexT>(handle, n_clusters);
-  auto clustering_cost    = raft::make_device_scalar<DataT>(handle, DataT{0});
+  auto centroid_sums      = raft::make_device_matrix<MathT, IndexT>(handle, n_clusters, n_features);
+  auto weight_per_cluster = raft::make_device_vector<MathT, IndexT>(handle, n_clusters);
+  auto clustering_cost    = raft::make_device_scalar<MathT>(handle, MathT{0});
 
   rmm::device_uvector<char> batch_workspace(streaming_batch_size, stream);
 
@@ -698,27 +731,27 @@ void kmeans_fit(
     X.data_handle(), n_samples, n_features, streaming_batch_size, stream);
   // Host-path weight batches: only materialized when weights are provided and
   // the data resides on host
-  std::optional<cuvs::spatial::knn::detail::utils::batch_load_iterator<DataT>> weight_batches;
+  std::optional<cuvs::spatial::knn::detail::utils::batch_load_iterator<MathT>> weight_batches;
   if constexpr (!data_on_device) {
     if (weight_ptr != nullptr) {
       weight_batches.emplace(weight_ptr, n_samples, 1, streaming_batch_size, stream);
     } else {
-      raft::matrix::fill(handle, batch_weights_buf.view(), DataT{1});
+      raft::matrix::fill(handle, batch_weights_buf.view(), MathT{1});
     }
   } else if (weight_ptr == nullptr) {
-    raft::matrix::fill(handle, batch_weights_buf.view(), DataT{1});
+    raft::matrix::fill(handle, batch_weights_buf.view(), MathT{1});
   }
 
-  std::optional<raft::device_vector<DataT, IndexT>> prenormalized_weights;
+  std::optional<raft::device_vector<MathT, IndexT>> prenormalized_weights;
   if constexpr (data_on_device) {
     if (weight_ptr != nullptr) {
-      prenormalized_weights.emplace(raft::make_device_vector<DataT, IndexT>(handle, n_samples));
-      const DataT* d_wt_sum_ptr = d_wt_sum.data_handle();
+      prenormalized_weights.emplace(raft::make_device_vector<MathT, IndexT>(handle, n_samples));
+      const MathT* d_wt_sum_ptr = d_wt_sum.data_handle();
       raft::linalg::map(
         handle,
         prenormalized_weights->view(),
-        [n_samples, d_wt_sum_ptr] __device__(DataT w) {
-          return w * static_cast<DataT>(n_samples) / *d_wt_sum_ptr;
+        [n_samples, d_wt_sum_ptr] __device__(MathT w) {
+          return w * static_cast<MathT>(n_samples) / *d_wt_sum_ptr;
         },
         sample_weight.value());
     }
@@ -726,30 +759,30 @@ void kmeans_fit(
 
   // Copies and rescales `wt_data` into `batch_weights_buf` so that weights
   // are normalized to sum to n_samples.
-  const DataT* d_wt_sum_ptr  = d_wt_sum.data_handle();
-  auto prepare_batch_weights = [&](const DataT* wt_data, IndexT cur_batch_size) {
+  const MathT* d_wt_sum_ptr  = d_wt_sum.data_handle();
+  auto prepare_batch_weights = [&](const MathT* wt_data, IndexT cur_batch_size) {
     if (wt_data != nullptr) {
       raft::copy(batch_weights_buf.data_handle(), wt_data, cur_batch_size, stream);
-      auto bw = raft::make_device_vector_view<DataT, IndexT>(batch_weights_buf.data_handle(),
+      auto bw = raft::make_device_vector_view<MathT, IndexT>(batch_weights_buf.data_handle(),
                                                              cur_batch_size);
       raft::linalg::map(
         handle,
         bw,
-        [n_samples, d_wt_sum_ptr] __device__(DataT w) {
-          return w * static_cast<DataT>(n_samples) / *d_wt_sum_ptr;
+        [n_samples, d_wt_sum_ptr] __device__(MathT w) {
+          return w * static_cast<MathT>(n_samples) / *d_wt_sum_ptr;
         },
         raft::make_const_mdspan(bw));
     }
-    return raft::make_device_vector_view<const DataT, IndexT>(batch_weights_buf.data_handle(),
+    return raft::make_device_vector_view<const MathT, IndexT>(batch_weights_buf.data_handle(),
                                                               cur_batch_size);
   };
 
-  auto cur_batch_weights = [&](IndexT batch_offset, const DataT* wt_data, IndexT cur_batch_size) {
+  auto cur_batch_weights = [&](IndexT batch_offset, const MathT* wt_data, IndexT cur_batch_size) {
     if constexpr (data_on_device) {
-      const DataT* base = prenormalized_weights.has_value()
+      const MathT* base = prenormalized_weights.has_value()
                             ? prenormalized_weights->data_handle() + batch_offset
                             : batch_weights_buf.data_handle();
-      return raft::make_device_vector_view<const DataT, IndexT>(base, cur_batch_size);
+      return raft::make_device_vector_view<const MathT, IndexT>(base, cur_batch_size);
     } else {
       return prepare_batch_weights(wt_data, cur_batch_size);
     }
@@ -764,17 +797,23 @@ void kmeans_fit(
 
   bool need_compute_norms = metric == cuvs::distance::DistanceType::L2Expanded ||
                             metric == cuvs::distance::DistanceType::L2SqrtExpanded;
-  auto h_norm_cache = raft::make_pinned_vector<DataT, IndexT>(
+  auto h_norm_cache = raft::make_pinned_vector<MathT, IndexT>(
     handle, (need_compute_norms && !data_on_device) ? n_samples : 0);
   bool norms_cached = false;
 
   auto compute_batch_norms = [&](const DataT* batch_ptr, IndexT batch_size) {
-    auto batch_view =
-      raft::make_device_matrix_view<const DataT, IndexT>(batch_ptr, batch_size, n_features);
     auto norm_view =
-      raft::make_device_vector_view<DataT, IndexT>(L2NormBatch.data_handle(), batch_size);
-    raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(
-      handle, batch_view, norm_view);
+      raft::make_device_vector_view<MathT, IndexT>(L2NormBatch.data_handle(), batch_size);
+    if constexpr (std::is_same_v<DataT, MathT>) {
+      auto batch_view =
+        raft::make_device_matrix_view<const MathT, IndexT>(batch_ptr, batch_size, n_features);
+      raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(
+        handle, batch_view, norm_view);
+    } else {
+      auto batch_view =
+        raft::make_device_matrix_view<const DataT, IndexT>(batch_ptr, batch_size, n_features);
+      mappedL2Norm<DataT, MathT, IndexT>(handle, batch_view, norm_view, mapping_op);
+    }
   };
 
   // Device path: compute X norms once up front
@@ -785,7 +824,7 @@ void kmeans_fit(
   }
 
   std::mt19937 gen(pams.rng_state.seed);
-  inertia[0] = std::numeric_limits<DataT>::max();
+  inertia[0] = std::numeric_limits<MathT>::max();
 
   for (int seed_iter = 0; seed_iter < n_init; ++seed_iter) {
     cuvs::cluster::kmeans::params iter_params = pams;
@@ -800,13 +839,13 @@ void kmeans_fit(
     new_centroids_ptr = new_centroids_buf.data();
     init_centroids(
       iter_params,
-      raft::make_device_matrix_view<DataT, IndexT>(cur_centroids_ptr, n_clusters, n_features));
+      raft::make_device_matrix_view<MathT, IndexT>(cur_centroids_ptr, n_clusters, n_features));
 
-    DataT iter_inertia    = std::numeric_limits<DataT>::max();
+    MathT iter_inertia    = std::numeric_limits<MathT>::max();
     IndexT n_current_iter = 0;
-    auto sqrdNormError    = raft::make_device_scalar<DataT>(handle, DataT{0});
+    auto sqrdNormError    = raft::make_device_scalar<MathT>(handle, MathT{0});
 
-    auto d_prior_cost = raft::make_device_scalar<DataT>(handle, DataT{0});
+    auto d_prior_cost = raft::make_device_scalar<MathT>(handle, MathT{0});
     auto d_done_flag  = raft::make_device_scalar<int>(handle, 0);
     auto h_done_flag  = raft::make_pinned_scalar<int>(handle, 0);
 
@@ -823,17 +862,17 @@ void kmeans_fit(
 
       RAFT_LOG_DEBUG("KMeans.fit: Iteration-%d", n_current_iter);
 
-      raft::matrix::fill(handle, centroid_sums.view(), DataT{0});
-      raft::matrix::fill(handle, weight_per_cluster.view(), DataT{0});
-      raft::matrix::fill(handle, clustering_cost.view(), DataT{0});
+      raft::matrix::fill(handle, centroid_sums.view(), MathT{0});
+      raft::matrix::fill(handle, weight_per_cluster.view(), MathT{0});
+      raft::matrix::fill(handle, clustering_cost.view(), MathT{0});
 
-      auto centroids_const = raft::make_device_matrix_view<const DataT, IndexT>(
+      auto centroids_const = raft::make_device_matrix_view<const MathT, IndexT>(
         cur_centroids_ptr, n_clusters, n_features);
       auto new_centroids_view =
-        raft::make_device_matrix_view<DataT, IndexT>(new_centroids_ptr, n_clusters, n_features);
+        raft::make_device_matrix_view<MathT, IndexT>(new_centroids_ptr, n_clusters, n_features);
 
       data_batches.reset();
-      using wt_iter_t = cuvs::spatial::knn::detail::utils::batch_load_iterator<DataT>;
+      using wt_iter_t = cuvs::spatial::knn::detail::utils::batch_load_iterator<MathT>;
       std::optional<wt_iter_t> wt_it;
       if (weight_batches.has_value()) {
         weight_batches->reset();
@@ -841,7 +880,7 @@ void kmeans_fit(
       }
       for (const auto& data_batch : data_batches) {
         IndexT cur_batch_size = static_cast<IndexT>(data_batch.size());
-        const DataT* wt_data  = nullptr;
+        const MathT* wt_data  = nullptr;
         if (wt_it.has_value()) {
           wt_data = (**wt_it).data();
           ++(*wt_it);
@@ -852,7 +891,7 @@ void kmeans_fit(
         auto batch_weights_view =
           cur_batch_weights(static_cast<IndexT>(data_batch.offset()), wt_data, cur_batch_size);
 
-        auto minCAD_view = raft::make_device_vector_view<raft::KeyValuePair<IndexT, DataT>, IndexT>(
+        auto minCAD_view = raft::make_device_vector_view<raft::KeyValuePair<IndexT, MathT>, IndexT>(
           minClusterAndDistance.data_handle(), cur_batch_size);
 
         if constexpr (!data_on_device) {
@@ -872,45 +911,46 @@ void kmeans_fit(
           }
         }
 
-        auto l2_const_view = raft::make_device_vector_view<const DataT, IndexT>(
+        auto l2_const_view = raft::make_device_vector_view<const MathT, IndexT>(
           L2NormBatch.data_handle(), cur_batch_size);
 
-        process_batch<DataT, IndexT>(handle,
-                                     batch_data_view,
-                                     batch_weights_view,
-                                     centroids_const,
-                                     metric,
-                                     iter_params.batch_samples,
-                                     iter_params.batch_centroids,
-                                     minCAD_view,
-                                     l2_const_view,
-                                     L2NormBuf_OR_DistBuf,
-                                     ws,
-                                     centroid_sums.view(),
-                                     weight_per_cluster.view(),
-                                     clustering_cost.view(),
-                                     batch_workspace);
+        process_batch<DataT, MathT, IndexT>(handle,
+                                            batch_data_view,
+                                            batch_weights_view,
+                                            centroids_const,
+                                            metric,
+                                            iter_params.batch_samples,
+                                            iter_params.batch_centroids,
+                                            minCAD_view,
+                                            l2_const_view,
+                                            L2NormBuf_OR_DistBuf,
+                                            ws,
+                                            centroid_sums.view(),
+                                            weight_per_cluster.view(),
+                                            clustering_cost.view(),
+                                            mapping_op,
+                                            batch_workspace);
       }
       if (need_compute_norms) { norms_cached = true; }
 
-      finalize_centroids<DataT, IndexT>(handle,
+      finalize_centroids<MathT, IndexT>(handle,
                                         raft::make_const_mdspan(centroid_sums.view()),
                                         raft::make_const_mdspan(weight_per_cluster.view()),
                                         centroids_const,
                                         new_centroids_view);
 
-      compute_centroid_shift<DataT, IndexT>(handle,
+      compute_centroid_shift<MathT, IndexT>(handle,
                                             raft::make_const_mdspan(centroids_const),
                                             raft::make_const_mdspan(new_centroids_view),
                                             sqrdNormError.view());
 
       std::swap(cur_centroids_ptr, new_centroids_ptr);
 
-      auto d_cost_view  = raft::make_device_scalar_view<const DataT>(clustering_cost.data_handle());
+      auto d_cost_view  = raft::make_device_scalar_view<const MathT>(clustering_cost.data_handle());
       auto d_prior_view = d_prior_cost.view();
-      auto d_norm_view  = raft::make_device_scalar_view<const DataT>(sqrdNormError.data_handle());
+      auto d_norm_view  = raft::make_device_scalar_view<const MathT>(sqrdNormError.data_handle());
       auto d_done_view  = d_done_flag.view();
-      DataT tol         = iter_params.tol;
+      MathT tol         = iter_params.tol;
       int iter          = n_current_iter;
 
       raft::linalg::map_offset(
@@ -927,12 +967,12 @@ void kmeans_fit(
     }
 
     {
-      auto centroids_const = raft::make_device_matrix_view<const DataT, IndexT>(
+      auto centroids_const = raft::make_device_matrix_view<const MathT, IndexT>(
         cur_centroids_ptr, n_clusters, n_features);
 
-      iter_inertia = DataT{0};
+      iter_inertia = MathT{0};
       data_batches.reset();
-      using wt_iter_t = cuvs::spatial::knn::detail::utils::batch_load_iterator<DataT>;
+      using wt_iter_t = cuvs::spatial::knn::detail::utils::batch_load_iterator<MathT>;
       std::optional<wt_iter_t> wt_it;
       if (weight_batches.has_value()) {
         weight_batches->reset();
@@ -940,7 +980,7 @@ void kmeans_fit(
       }
       for (const auto& data_batch : data_batches) {
         IndexT cur_batch_size = static_cast<IndexT>(data_batch.size());
-        const DataT* wt_data  = nullptr;
+        const MathT* wt_data  = nullptr;
         if (wt_it.has_value()) {
           wt_data = (**wt_it).data();
           ++(*wt_it);
@@ -949,20 +989,56 @@ void kmeans_fit(
         auto batch_data_view = raft::make_device_matrix_view<const DataT, IndexT>(
           data_batch.data(), cur_batch_size, n_features);
 
-        std::optional<raft::device_vector_view<const DataT, IndexT>> batch_sw = std::nullopt;
-        if (weight_ptr != nullptr) {
-          batch_sw =
-            cur_batch_weights(static_cast<IndexT>(data_batch.offset()), wt_data, cur_batch_size);
+        auto batch_weights_view =
+          cur_batch_weights(static_cast<IndexT>(data_batch.offset()), wt_data, cur_batch_size);
+
+        if constexpr (!data_on_device) {
+          if (need_compute_norms) {
+            if (!norms_cached) {
+              compute_batch_norms(data_batch.data(), cur_batch_size);
+            } else {
+              raft::copy(L2NormBatch.data_handle(),
+                         h_norm_cache.data_handle() + data_batch.offset(),
+                         cur_batch_size,
+                         stream);
+            }
+          }
         }
 
-        DataT batch_cost = DataT{0};
-        cuvs::cluster::kmeans::cluster_cost(handle,
-                                            batch_data_view,
-                                            centroids_const,
-                                            raft::make_host_scalar_view(&batch_cost),
-                                            batch_sw);
+        auto minCAD_view = raft::make_device_vector_view<raft::KeyValuePair<IndexT, MathT>, IndexT>(
+          minClusterAndDistance.data_handle(), cur_batch_size);
+        auto l2_const_view = raft::make_device_vector_view<const MathT, IndexT>(
+          L2NormBatch.data_handle(), cur_batch_size);
 
-        iter_inertia += batch_cost;
+        minClusterAndDistanceCompute<DataT, MathT, IndexT>(handle,
+                                                           batch_data_view,
+                                                           centroids_const,
+                                                           minCAD_view,
+                                                           l2_const_view,
+                                                           L2NormBuf_OR_DistBuf,
+                                                           cuvs::distance::DistanceType::L2Expanded,
+                                                           iter_params.batch_samples,
+                                                           iter_params.batch_centroids,
+                                                           mapping_op,
+                                                           ws);
+
+        raft::linalg::map(
+          handle,
+          minCAD_view,
+          [=] __device__(const raft::KeyValuePair<IndexT, MathT> kvp, MathT wt) {
+            raft::KeyValuePair<IndexT, MathT> res;
+            res.value = kvp.value * wt;
+            res.key   = kvp.key;
+            return res;
+          },
+          raft::make_const_mdspan(minCAD_view),
+          batch_weights_view);
+
+        auto batch_cost = raft::make_device_scalar<MathT>(handle, MathT{0});
+        computeClusterCost(
+          handle, minCAD_view, ws, batch_cost.view(), raft::value_op{}, raft::add_op{});
+
+        iter_inertia += batch_cost.value(stream);
       }
     }
 
@@ -978,6 +1054,23 @@ void kmeans_fit(
                    n_iter[0]);
   }
   RAFT_LOG_DEBUG("KMeans.fit: async call returned (fit could still be running on the device)");
+}
+
+template <typename DataT, typename IndexT, typename Accessor>
+void kmeans_fit(
+  raft::resources const& handle,
+  const cuvs::cluster::kmeans::params& pams,
+  raft::mdspan<const DataT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
+  std::optional<
+    raft::mdspan<const DataT, raft::vector_extent<IndexT>, raft::layout_right, Accessor>>
+    sample_weight,
+  raft::device_matrix_view<DataT, IndexT> centroids,
+  raft::host_scalar_view<DataT> inertia,
+  raft::host_scalar_view<IndexT> n_iter,
+  std::optional<std::reference_wrapper<rmm::device_uvector<char>>> workspace)
+{
+  kmeans_fit<DataT, DataT, raft::identity_op, IndexT, Accessor>(
+    handle, pams, X, sample_weight, centroids, inertia, n_iter, raft::identity_op{}, workspace);
 }
 
 template <typename DataT, typename IndexT = int>

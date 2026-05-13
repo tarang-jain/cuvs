@@ -16,6 +16,11 @@
 
 namespace {
 
+bool is_dlpack_float32(DLTensor const& tensor)
+{
+  return tensor.dtype.code == kDLFloat && tensor.dtype.bits == 32;
+}
+
 // The conversions are templated on the C struct type and reused by both API surfaces.
 template <typename ParamsT>
 cuvs::cluster::kmeans::params convert_params(const ParamsT& params)
@@ -143,6 +148,71 @@ void _fit(cuvsResources_t res,
   }
 }
 
+template <typename InputT, typename ParamsT, typename IdxT = int64_t>
+void _fit_host_quantized(cuvsResources_t res,
+                         const ParamsT& params,
+                         DLManagedTensor* X_tensor,
+                         DLManagedTensor* sample_weight_tensor,
+                         DLManagedTensor* centroids_tensor,
+                         double* inertia,
+                         int* n_iter)
+{
+  auto X       = X_tensor->dl_tensor;
+  auto res_ptr = reinterpret_cast<raft::resources*>(res);
+
+  if (cuvs::core::is_dlpack_device_compatible(X)) {
+    RAFT_FAIL("regular int8/uint8 kmeans is only supported for host streaming input");
+  }
+
+  if (params.hierarchical) { RAFT_FAIL("hierarchical kmeans is not supported with host data"); }
+
+  auto centroids_dl = centroids_tensor->dl_tensor;
+  if (!cuvs::core::is_dlpack_device_compatible(centroids_dl)) {
+    RAFT_FAIL("centroids must be on device memory");
+  }
+  if (!is_dlpack_float32(centroids_dl)) {
+    RAFT_FAIL("centroids must have float32 dtype for int8/uint8 host kmeans");
+  }
+
+  auto n_samples  = static_cast<IdxT>(X.shape[0]);
+  auto n_features = static_cast<IdxT>(X.shape[1]);
+
+  auto X_view = raft::make_host_matrix_view<InputT const, IdxT>(
+    reinterpret_cast<InputT const*>(X.data), n_samples, n_features);
+  auto centroids_view =
+    cuvs::core::from_dlpack<raft::device_matrix_view<float, IdxT, raft::row_major>>(
+      centroids_tensor);
+
+  std::optional<raft::host_vector_view<float const, IdxT>> sample_weight;
+  if (sample_weight_tensor != NULL) {
+    auto sw = sample_weight_tensor->dl_tensor;
+    if (!cuvs::core::is_dlpack_host_compatible(sw)) {
+      RAFT_FAIL("sample_weight must be host accessible when X is on host");
+    }
+    if (!is_dlpack_float32(sw)) {
+      RAFT_FAIL("sample_weight must have float32 dtype for int8/uint8 host kmeans");
+    }
+    sample_weight =
+      raft::make_host_vector_view<float const, IdxT>(reinterpret_cast<float const*>(sw.data),
+                                                     n_samples);
+  }
+
+  float inertia_temp;
+  IdxT n_iter_temp;
+
+  auto kmeans_params = convert_params(params);
+  cuvs::cluster::kmeans::fit(*res_ptr,
+                             kmeans_params,
+                             X_view,
+                             sample_weight,
+                             centroids_view,
+                             raft::make_host_scalar_view<float>(&inertia_temp),
+                             raft::make_host_scalar_view<IdxT>(&n_iter_temp));
+
+  *inertia = inertia_temp;
+  *n_iter  = n_iter_temp;
+}
+
 template <typename T, typename ParamsT, typename IdxT = int32_t, typename LabelsT = int32_t>
 void _predict(cuvsResources_t res,
               const ParamsT& params,
@@ -267,6 +337,10 @@ extern "C" cuvsError_t cuvsKMeansFit(cuvsResources_t res,
       _fit<float>(res, *params, X, sample_weight, centroids, inertia, n_iter);
     } else if (dataset.dtype.code == kDLFloat && dataset.dtype.bits == 64) {
       _fit<double>(res, *params, X, sample_weight, centroids, inertia, n_iter);
+    } else if (dataset.dtype.code == kDLInt && dataset.dtype.bits == 8) {
+      _fit_host_quantized<int8_t>(res, *params, X, sample_weight, centroids, inertia, n_iter);
+    } else if (dataset.dtype.code == kDLUInt && dataset.dtype.bits == 8) {
+      _fit_host_quantized<uint8_t>(res, *params, X, sample_weight, centroids, inertia, n_iter);
     } else {
       RAFT_FAIL("Unsupported dataset DLtensor dtype: %d and bits: %d",
                 dataset.dtype.code,
@@ -339,6 +413,10 @@ extern "C" cuvsError_t cuvsKMeansFit_v2(cuvsResources_t res,
       _fit<float>(res, *params, X, sample_weight, centroids, inertia, n_iter);
     } else if (dataset.dtype.code == kDLFloat && dataset.dtype.bits == 64) {
       _fit<double>(res, *params, X, sample_weight, centroids, inertia, n_iter);
+    } else if (dataset.dtype.code == kDLInt && dataset.dtype.bits == 8) {
+      _fit_host_quantized<int8_t>(res, *params, X, sample_weight, centroids, inertia, n_iter);
+    } else if (dataset.dtype.code == kDLUInt && dataset.dtype.bits == 8) {
+      _fit_host_quantized<uint8_t>(res, *params, X, sample_weight, centroids, inertia, n_iter);
     } else {
       RAFT_FAIL("Unsupported dataset DLtensor dtype: %d and bits: %d",
                 dataset.dtype.code,

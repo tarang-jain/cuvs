@@ -239,7 +239,8 @@ def fit(
         GPU per batch.
     X : array-like
         Training instances, shape (m, k).  Accepts both device arrays
-        (cupy / CUDA array interface) and host arrays (numpy).
+        (cupy / CUDA array interface) and host arrays (numpy). Host int8
+        and uint8 inputs are streamed as float32.
     centroids : Optional writable CUDA array interface compliant matrix
                 shape (n_clusters, k)
     sample_weights : Optional weights per observation.  Must reside on
@@ -312,8 +313,14 @@ def fit(
                 raise ValueError("sample_weights must have C contiguous layout")
 
     x_ai = wrap_array(X)
-    _check_input_array(
-        x_ai, [np.dtype('float32'), np.dtype('float64')]
+    allowed_dtypes = [np.dtype('float32'), np.dtype('float64')]
+    if is_host:
+        allowed_dtypes.extend([np.dtype('int8'), np.dtype('uint8')])
+    _check_input_array(x_ai, allowed_dtypes)
+
+    is_quantized_host = (
+        is_host and np.dtype(x_ai.dtype) in
+        (np.dtype('int8'), np.dtype('uint8'))
     )
 
     cdef cydlpack.DLManagedTensor* x_dlpack = cydlpack.dlpack_c(x_ai)
@@ -325,17 +332,24 @@ def fit(
     cdef int n_iter = 0
 
     if centroids is None:
+        centroid_dtype = np.dtype('float32') if is_quantized_host else x_ai.dtype
         centroids = device_ndarray.empty(
-            (params.n_clusters, x_ai.shape[1]), dtype=x_ai.dtype
+            (params.n_clusters, x_ai.shape[1]), dtype=centroid_dtype
         )
 
     centroids_ai = wrap_array(centroids)
+    if is_quantized_host:
+        _check_input_array(centroids_ai, [np.dtype('float32')])
+
     cdef cydlpack.DLManagedTensor* centroids_dlpack = \
         cydlpack.dlpack_c(centroids_ai)
 
     if sample_weights is not None:
+        sample_weights_ai = wrap_array(sample_weights)
+        if is_quantized_host:
+            _check_input_array(sample_weights_ai, [np.dtype('float32')])
         sample_weight_dlpack = \
-            cydlpack.dlpack_c(wrap_array(sample_weights))
+            cydlpack.dlpack_c(sample_weights_ai)
 
     with cuda_interruptible():
         check_cuvs(cuvsKMeansFit(

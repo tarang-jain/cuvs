@@ -6,6 +6,8 @@
 
 #include "kmeans.cuh"
 
+#include <type_traits>
+
 namespace cuvs::cluster::kmeans {
 
 template <typename DataT, typename IndexT>
@@ -68,6 +70,27 @@ void fit(raft::resources const& handle,
 {
   cuvs::cluster::kmeans::detail::fit<DataT, IndexT>(
     handle, params, X, sample_weight, centroids, inertia, n_iter);
+}
+
+template <typename InputT, typename MathT, typename IndexT>
+std::enable_if_t<!std::is_same_v<InputT, MathT>> fit(
+  raft::resources const& handle,
+  const kmeans::params& params,
+  raft::host_matrix_view<const InputT, IndexT> X,
+  std::optional<raft::host_vector_view<const MathT, IndexT>> sample_weight,
+  raft::device_matrix_view<MathT, IndexT> centroids,
+  raft::host_scalar_view<MathT> inertia,
+  raft::host_scalar_view<IndexT> n_iter)
+{
+  cuvs::cluster::kmeans::detail::kmeans_fit(handle,
+                                            params,
+                                            X,
+                                            sample_weight,
+                                            centroids,
+                                            inertia,
+                                            n_iter,
+                                            cuvs::spatial::knn::detail::utils::mapping<MathT>{},
+                                            std::nullopt);
 }
 
 }  // namespace cuvs::cluster::kmeans

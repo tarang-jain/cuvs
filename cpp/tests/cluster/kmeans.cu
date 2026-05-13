@@ -741,4 +741,71 @@ INSTANTIATE_TEST_CASE_P(KmeansFitBatchedTests,
                         KmeansFitBatchedTestD,
                         ::testing::ValuesIn(batched_inputsd2));
 
+template <typename InputT>
+void runQuantizedHostFit(float scale)
+{
+  raft::resources handle;
+  auto stream = raft::resource::get_cuda_stream(handle);
+
+  constexpr int64_t n_samples  = 8;
+  constexpr int64_t n_features = 2;
+  constexpr int64_t n_clusters = 2;
+
+  std::vector<InputT> h_X = {InputT{1},
+                             InputT{1},
+                             InputT{1},
+                             InputT{2},
+                             InputT{2},
+                             InputT{1},
+                             InputT{2},
+                             InputT{2},
+                             InputT{10},
+                             InputT{10},
+                             InputT{10},
+                             InputT{11},
+                             InputT{11},
+                             InputT{10},
+                             InputT{11},
+                             InputT{11}};
+  std::vector<float> h_weights(n_samples, 1.0f);
+  std::vector<float> h_centroids = {0.0f, 0.0f, 12.0f * scale, 12.0f * scale};
+  std::vector<float> h_expected  = {1.5f * scale, 1.5f * scale, 10.5f * scale, 10.5f * scale};
+
+  auto d_centroids = raft::make_device_matrix<float, int64_t>(handle, n_clusters, n_features);
+  raft::copy(d_centroids.data_handle(), h_centroids.data(), h_centroids.size(), stream);
+
+  cuvs::cluster::kmeans::params params;
+  params.n_clusters           = n_clusters;
+  params.init                 = cuvs::cluster::kmeans::params::Array;
+  params.max_iter             = 20;
+  params.tol                  = 1e-6;
+  params.streaming_batch_size = 3;
+
+  float inertia  = 0.0f;
+  int64_t n_iter = 0;
+  auto sw        = std::make_optional(
+    raft::make_host_vector_view<const float, int64_t>(h_weights.data(), n_samples));
+
+  cuvs::cluster::kmeans::fit(
+    handle,
+    params,
+    raft::make_host_matrix_view<const InputT, int64_t>(h_X.data(), n_samples, n_features),
+    sw,
+    d_centroids.view(),
+    raft::make_host_scalar_view(&inertia),
+    raft::make_host_scalar_view(&n_iter));
+  raft::resource::sync_stream(handle, stream);
+
+  ASSERT_TRUE(cuvs::devArrMatchHost(h_expected.data(),
+                                    d_centroids.data_handle(),
+                                    h_expected.size(),
+                                    cuvs::CompareApprox<float>(1e-4f)));
+  EXPECT_GT(n_iter, 0);
+  EXPECT_NEAR(inertia, 4.0f * scale * scale, 1e-5f);
+}
+
+TEST(KmeansFitBatchedQuantizedTests, Int8Host) { runQuantizedHostFit<int8_t>(1.0f / 128.0f); }
+
+TEST(KmeansFitBatchedQuantizedTests, Uint8Host) { runQuantizedHostFit<uint8_t>(1.0f / 256.0f); }
+
 }  // namespace cuvs

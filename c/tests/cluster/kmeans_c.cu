@@ -19,6 +19,7 @@
 #include <cuvs/core/c_api.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace {
 
@@ -228,6 +229,75 @@ void test_fit_host()
   ASSERT_EQ(cuvsResourcesDestroy(res), CUVS_SUCCESS);
 }
 
+template <typename Api, typename InputT>
+void test_fit_host_quantized(float scale)
+{
+  raft::handle_t handle;
+  auto stream = raft::resource::get_cuda_stream(handle);
+
+  std::vector<InputT> dataset_h = {InputT{1},
+                                   InputT{1},
+                                   InputT{1},
+                                   InputT{2},
+                                   InputT{2},
+                                   InputT{1},
+                                   InputT{2},
+                                   InputT{2},
+                                   InputT{10},
+                                   InputT{10},
+                                   InputT{10},
+                                   InputT{11},
+                                   InputT{11},
+                                   InputT{10},
+                                   InputT{11},
+                                   InputT{11}};
+  std::vector<float> centroids_h = {0.0f, 0.0f, 12.0f * scale, 12.0f * scale};
+  std::vector<float> expected_h  = {1.5f * scale, 1.5f * scale, 10.5f * scale, 10.5f * scale};
+
+  rmm::device_uvector<float> centroids_d(kNClusters * kNFeatures, stream);
+  raft::copy(centroids_d.data(), centroids_h.data(), centroids_h.size(), stream);
+
+  cuvsResources_t res;
+  ASSERT_EQ(cuvsResourcesCreate(&res), CUVS_SUCCESS);
+
+  typename Api::params_t params;
+  ASSERT_EQ(Api::params_create(&params), CUVS_SUCCESS);
+  params->n_clusters           = kNClusters;
+  params->max_iter             = 100;
+  params->tol                  = 1e-6;
+  params->init                 = Array;
+  params->streaming_batch_size = 3;
+
+  DLManagedTensor dataset_t{};
+  cuvs::core::to_dlpack(
+    raft::make_host_matrix_view<InputT, int64_t>(dataset_h.data(), kNSamples, kNFeatures),
+    &dataset_t);
+
+  DLManagedTensor centroids_t{};
+  cuvs::core::to_dlpack(
+    raft::make_device_matrix_view<float, int64_t>(centroids_d.data(), kNClusters, kNFeatures),
+    &centroids_t);
+
+  double inertia = -1.0;
+  int n_iter     = -1;
+
+  ASSERT_EQ(Api::fit(res, params, &dataset_t, &centroids_t, &inertia, &n_iter), CUVS_SUCCESS);
+
+  ASSERT_TRUE(cuvs::devArrMatchHost(expected_h.data(),
+                                    centroids_d.data(),
+                                    expected_h.size(),
+                                    cuvs::CompareApprox<float>(1e-4f)));
+
+  EXPECT_GT(n_iter, 0);
+  EXPECT_NEAR(inertia, 4.0 * scale * scale, 1e-5);
+
+  centroids_t.deleter(&centroids_t);
+  dataset_t.deleter(&dataset_t);
+
+  ASSERT_EQ(Api::params_destroy(params), CUVS_SUCCESS);
+  ASSERT_EQ(cuvsResourcesDestroy(res), CUVS_SUCCESS);
+}
+
 }  // namespace
 
 TEST(KMeansC, FitPredict) { test_fit_predict<kmeans_api_v1>(); }
@@ -239,6 +309,14 @@ TEST(KMeansC, FitHost) { test_fit_host<kmeans_api_v1>(); }
 // TODO(cuVS 26.08): remove FitHostV2 once `_v2` is promoted to the
 // unsuffixed ABI.
 TEST(KMeansC, FitHostV2) { test_fit_host<kmeans_api_v2>(); }
+
+TEST(KMeansC, FitHostInt8) { test_fit_host_quantized<kmeans_api_v1, int8_t>(1.0f / 128.0f); }
+
+TEST(KMeansC, FitHostUint8) { test_fit_host_quantized<kmeans_api_v1, uint8_t>(1.0f / 256.0f); }
+
+TEST(KMeansC, FitHostInt8V2) { test_fit_host_quantized<kmeans_api_v2, int8_t>(1.0f / 128.0f); }
+
+TEST(KMeansC, FitHostUint8V2) { test_fit_host_quantized<kmeans_api_v2, uint8_t>(1.0f / 256.0f); }
 
 TEST(KMeansC, ParamsCreateDestroy)
 {
