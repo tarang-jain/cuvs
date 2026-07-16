@@ -27,7 +27,7 @@ void fit(raft::resources const& handle,
          raft::host_scalar_view<double> inertia,
          raft::host_scalar_view<int> n_iter)
 {
-  cuvs::cluster::kmeans::mg::detail::mnmg_fit<double, int>(
+  cuvs::cluster::kmeans::detail::mnmg_fit<double, int>(
     handle, params, X_parts, sample_weight_parts, centroids, inertia, n_iter);
 }
 
@@ -40,7 +40,7 @@ void fit(raft::resources const& handle,
          raft::host_scalar_view<double> inertia,
          raft::host_scalar_view<int64_t> n_iter)
 {
-  cuvs::cluster::kmeans::mg::detail::mnmg_fit<double, int64_t>(
+  cuvs::cluster::kmeans::detail::mnmg_fit<double, int64_t>(
     handle, params, X_parts, sample_weight_parts, centroids, inertia, n_iter);
 }
 
@@ -53,7 +53,7 @@ void fit(raft::resources const& handle,
          raft::host_scalar_view<double> inertia,
          raft::host_scalar_view<int64_t> n_iter)
 {
-  cuvs::cluster::kmeans::mg::detail::mnmg_fit<double, int64_t>(
+  cuvs::cluster::kmeans::detail::mnmg_fit<double, int64_t>(
     handle, params, X_parts, sample_weight_parts, centroids, inertia, n_iter);
 }
 

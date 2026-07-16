@@ -49,7 +49,7 @@ void fit(raft::resources const& handle,
     if (sample_weight.has_value()) {
       sw_parts = std::vector<raft::device_vector_view<const float, int>>{*sample_weight};
     }
-    cuvs::cluster::kmeans::mg::detail::mnmg_fit<float, int>(
+    cuvs::cluster::kmeans::detail::mnmg_fit<float, int>(
       handle, params, X_parts, sw_parts, centroids, inertia, n_iter);
     return;
   }
@@ -73,7 +73,7 @@ void fit(raft::resources const& handle,
     if (sample_weight.has_value()) {
       sw_parts = std::vector<raft::device_vector_view<const float, int64_t>>{*sample_weight};
     }
-    cuvs::cluster::kmeans::mg::detail::mnmg_fit<float, int64_t>(
+    cuvs::cluster::kmeans::detail::mnmg_fit<float, int64_t>(
       handle, params, X_parts, sw_parts, centroids, inertia, n_iter);
     return;
   }
@@ -92,7 +92,7 @@ void fit(raft::resources const& handle,
 {
 #ifdef CUVS_BUILD_MG_ALGOS
   if (raft::resource::is_multi_gpu(handle)) {
-    cuvs::cluster::kmeans::mg::detail::batched_fit_omp<float, int64_t>(
+    cuvs::cluster::kmeans::detail::batched_fit_omp<float, int64_t>(
       handle, params, X, sample_weight, centroids, inertia, n_iter);
     return;
   }
@@ -102,7 +102,7 @@ void fit(raft::resources const& handle,
     if (sample_weight.has_value()) {
       sw_parts = std::vector<raft::host_vector_view<const float, int64_t>>{*sample_weight};
     }
-    cuvs::cluster::kmeans::mg::detail::mnmg_fit<float, int64_t>(
+    cuvs::cluster::kmeans::detail::mnmg_fit<float, int64_t>(
       handle, params, X_parts, sw_parts, centroids, inertia, n_iter);
     return;
   }

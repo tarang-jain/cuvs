@@ -37,7 +37,7 @@
 #include <random>
 #include <vector>
 
-namespace cuvs::cluster::kmeans::mg::detail {
+namespace cuvs::cluster::kmeans::detail {
 
 /**
  * @brief Compute the global cluster cost (psi) over partitioned device data.
@@ -487,4 +487,4 @@ void initKMeansPlusPlus_distributed(
   }
 }
 
-}  // namespace cuvs::cluster::kmeans::mg::detail
+}  // namespace cuvs::cluster::kmeans::detail

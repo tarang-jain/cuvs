@@ -49,7 +49,7 @@
 #include <random>
 #include <vector>
 
-namespace cuvs::cluster::kmeans::mg::detail {
+namespace cuvs::cluster::kmeans::detail {
 
 using cuvs::core::detail::mnmg_comms;
 
@@ -664,4 +664,4 @@ void batched_fit_omp(const raft::resources& clique,
     num_ranks);
 }
 
-}  // namespace cuvs::cluster::kmeans::mg::detail
+}  // namespace cuvs::cluster::kmeans::detail

@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-namespace cuvs::cluster::kmeans::mg::detail {
+namespace cuvs::cluster::kmeans::detail {
 
 template <typename DataT, typename IndexT>
 void initKMeansPlusPlus_distributed(
@@ -327,4 +327,4 @@ void init_centroids_for_mg_batched(
   }
 }
 
-}  // namespace cuvs::cluster::kmeans::mg::detail
+}  // namespace cuvs::cluster::kmeans::detail
