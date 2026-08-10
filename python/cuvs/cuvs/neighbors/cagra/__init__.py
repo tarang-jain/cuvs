@@ -1,11 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
 # SPDX-License-Identifier: Apache-2.0
 
 
-from cuvs.common.dataset import Dataset
-
 from .cagra import (
     AceParams,
+    CompressionParams,
     ExtendParams,
     Index,
     IndexParams,
@@ -16,12 +15,11 @@ from .cagra import (
     load,
     save,
     search,
-    update_dataset,
 )
 
 __all__ = [
     "AceParams",
-    "Dataset",
+    "CompressionParams",
     "ExtendParams",
     "Index",
     "IndexParams",
@@ -32,5 +30,4 @@ __all__ = [
     "load",
     "save",
     "search",
-    "update_dataset",
 ]

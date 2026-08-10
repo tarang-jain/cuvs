@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -77,8 +77,7 @@ class cuvs_mg_cagra : public algo<T>, public algo_gpu {
   float refine_ratio_;
   build_param index_params_;
   cuvs::neighbors::mg_search_params<cagra::search_params> search_params_;
-  std::shared_ptr<
-    cuvs::neighbors::mg_index<cuvs::neighbors::cagra::device_standard_index<T, IdxT>, T, IdxT>>
+  std::shared_ptr<cuvs::neighbors::mg_index<cuvs::neighbors::cagra::index<T, IdxT>, T, IdxT>>
     index_;
 };
 
@@ -91,13 +90,12 @@ void cuvs_mg_cagra<T, IdxT>::build(const T* dataset, size_t nrow)
   cuvs::neighbors::mg_index_params<cagra::index_params> build_params = params;
   build_params.mode                                                  = index_params_.mode;
 
-  auto dataset_mds =
+  auto dataset_view =
     raft::make_host_matrix_view<const T, int64_t, raft::row_major>(dataset, nrow, dim_);
-  auto dataset_view = cuvs::neighbors::make_host_standard_dataset_view(dataset_mds);
-  auto idx          = cuvs::neighbors::cagra::build(clique_, build_params, dataset_view);
-  index_            = std::make_shared<
-               cuvs::neighbors::mg_index<cuvs::neighbors::cagra::device_standard_index<T, IdxT>, T, IdxT>>(
-    std::move(idx));
+  auto idx = cuvs::neighbors::cagra::build(clique_, build_params, dataset_view);
+  index_ =
+    std::make_shared<cuvs::neighbors::mg_index<cuvs::neighbors::cagra::index<T, IdxT>, T, IdxT>>(
+      std::move(idx));
 }
 
 inline auto allocator_to_string(AllocatorType mem_type) -> std::string;
@@ -128,10 +126,9 @@ void cuvs_mg_cagra<T, IdxT>::save(const std::string& file) const
 template <typename T, typename IdxT>
 void cuvs_mg_cagra<T, IdxT>::load(const std::string& file)
 {
-  index_ = std::make_shared<
-    cuvs::neighbors::mg_index<cuvs::neighbors::cagra::device_standard_index<T, IdxT>, T, IdxT>>(
-    clique_, index_params_.mode);
-  cuvs::neighbors::cagra::deserialize<T, IdxT>(clique_, file, index_.get());
+  index_ =
+    std::make_shared<cuvs::neighbors::mg_index<cuvs::neighbors::cagra::index<T, IdxT>, T, IdxT>>(
+      std::move(cuvs::neighbors::cagra::deserialize<T, IdxT>(clique_, file)));
 }
 
 template <typename T, typename IdxT>

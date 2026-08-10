@@ -20,10 +20,9 @@
 mod index;
 mod params;
 
-pub use crate::dataset::{CuvsDataset, Dataset, DatasetKind, DatasetView, PaddedDataset};
 pub use crate::neighbors::filters::{Bitset, Filter};
-pub use index::{DeserializedIndex, Index};
-pub use params::{IndexParams, SearchParams};
+pub use index::Index;
+pub use params::{CompressionParams, IndexParams, SearchParams};
 
 use crate::dlpack::DLPackError;
 use crate::error::LibraryError;

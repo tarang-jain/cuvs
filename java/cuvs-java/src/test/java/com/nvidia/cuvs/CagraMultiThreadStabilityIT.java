@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 package com.nvidia.cuvs;
@@ -84,17 +84,11 @@ public class CagraMultiThreadStabilityIT extends CuVSTestCase {
               .withMetric(CuvsDistanceType.L2Expanded)
               .build();
 
-      try (var deviceDataset = CuVSMatrix.ofArray(dataset).toDevice(resources);
-          CagraIndex index =
-              CagraIndex.newBuilder(resources)
-                  .withDataset(dataset)
-                  .withIndexParams(indexParams)
-                  .build();
-          // Dim=256 floats is already 16-byte aligned, so wrap a padded view directly.
-          // Close order is reverse declaration: view, then index, then deviceDataset.
-          var paddedView = index.makePaddedDatasetView(deviceDataset)) {
-
-        index.updateDataset(paddedView);
+      try (CagraIndex index =
+          CagraIndex.newBuilder(resources)
+              .withDataset(dataset)
+              .withIndexParams(indexParams)
+              .build()) {
 
         log.trace("CAGRA index created, starting high-contention multi-threaded search...");
 

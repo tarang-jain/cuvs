@@ -222,15 +222,6 @@ files:
       key: opensearch
     includes:
       - bench_python_opensearch
-  py_synthesize_dataset_cuvs_bench:
-    output: pyproject
-    pyproject_dir: python/cuvs_bench
-    extras:
-      table: project.optional-dependencies
-      key: synthesize_dataset
-    includes:
-      - bench_python_synthesize_dataset
-      - depends_on_cupy
 channels:
   - rapidsai-nightly
   - rapidsai
@@ -297,11 +288,6 @@ dependencies:
       - output_types: [conda]
         packages:
           - c-compiler
-      # spotless-fmt pre-commit hook requires Maven and a JDK
-      - output_types: [conda]
-        packages:
-          - maven
-          - &openjdk openjdk=22.*
   clang:
     common:
       - output_types: conda
@@ -596,7 +582,7 @@ dependencies:
           - *cmake_ver
           - libboost-devel
           - maven
-          - *openjdk
+          - openjdk=22.*
   bench:
     common:
       - output_types: [conda, pyproject, requirements]
@@ -638,12 +624,6 @@ dependencies:
       - output_types: [conda, pyproject]
         packages:
           - opensearch-py>=2.4.0
-  bench_python_synthesize_dataset:
-    common:
-      - output_types: pyproject
-        packages:
-          - *numpy
-          - tqdm
   depends_on_cuda_python:
     specific:
       - output_types: [conda, requirements, pyproject]

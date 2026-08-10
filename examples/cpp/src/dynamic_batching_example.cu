@@ -1,12 +1,11 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "common.cuh"
 
 #include <cuvs/neighbors/cagra.hpp>
-#include <cuvs/neighbors/common.hpp>
 #include <cuvs/neighbors/dynamic_batching.hpp>
 
 #include <raft/core/device_mdarray.hpp>
@@ -114,9 +113,7 @@ void dynamic_batching_example(raft::resources const& res,
   cagra::index_params orig_index_params;
 
   std::cout << "Building CAGRA index (search graph)" << std::endl;
-  auto padded     = cuvs::neighbors::make_device_padded_dataset_view(res, dataset);
-  auto orig_index = cagra::build(res, orig_index_params, padded);
-  orig_index.update_device_dataset_same_layout(res, padded);
+  auto orig_index = cagra::build(res, orig_index_params, dataset);
 
   std::cout << "CAGRA index has " << orig_index.size() << " vectors" << std::endl;
   std::cout << "CAGRA graph has degree " << orig_index.graph_degree() << ", graph size ["

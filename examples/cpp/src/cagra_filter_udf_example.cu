@@ -1,10 +1,9 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cuvs/neighbors/cagra.hpp>
-#include <cuvs/neighbors/common.hpp>
 
 #include <raft/core/copy.cuh>
 #include <raft/core/device_mdarray.hpp>
@@ -145,9 +144,8 @@ int main()
     index_params.intermediate_graph_degree);
 
   std::cout << "Building CAGRA index" << std::endl;
-  auto padded = cuvs::neighbors::make_device_padded_dataset_view(res, dataset.view());
-  auto index  = cuvs::neighbors::cagra::build(res, index_params, padded);
-  index.update_device_dataset_same_layout(res, padded);
+  auto index =
+    cuvs::neighbors::cagra::build(res, index_params, raft::make_const_mdspan(dataset.view()));
 
   std::vector<uint32_t> row_tenant_ids(n_rows);
   std::vector<int64_t> row_timestamps(n_rows);

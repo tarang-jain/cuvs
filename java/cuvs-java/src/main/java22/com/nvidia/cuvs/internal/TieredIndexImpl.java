@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 package com.nvidia.cuvs.internal;
@@ -244,8 +244,7 @@ public class TieredIndexImpl implements TieredIndex {
           if (hasPreFilter) {
             BitSet concatenatedFilters = concatenate(prefilters, (int) query.getNumDocs());
             long[] filters = concatenatedFilters.toLongArray();
-            MemorySegment hostPrefilterSeg =
-                buildMemorySegment(localArena, filters, (prefilterDataLength + 63) / 64);
+            MemorySegment hostPrefilterSeg = buildMemorySegment(localArena, filters);
 
             long[] prefilterShape = {prefilterLen};
 

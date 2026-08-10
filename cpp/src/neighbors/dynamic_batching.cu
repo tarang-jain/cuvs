@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,19 +13,9 @@
 #include <raft/core/device_mdspan.hpp>
 #include <raft/core/resources.hpp>
 
-namespace cuvs::neighbors::cagra {
-
-// Single-token names for CUVS_INST_DYNAMIC_BATCHING_INDEX (macro expands Namespace ::__VA_ARGS__).
-using cagra_f32_u32_index = device_padded_index<float, uint32_t>;
-using cagra_f16_u32_index = device_padded_index<half, uint32_t>;
-using cagra_i8_u32_index  = device_padded_index<int8_t, uint32_t>;
-using cagra_u8_u32_index  = device_padded_index<uint8_t, uint32_t>;
-
-}  // namespace cuvs::neighbors::cagra
-
 namespace cuvs::neighbors::dynamic_batching {
 
-// NB: the (template) index parameter should be the last; it must be a single preprocessor token
+// NB: the (template) index parameter should be the last; it may contain the spaces and so split
 //       into multiple preprocessor token. Then it is consumed as __VA_ARGS__
 //
 #define CUVS_INST_DYNAMIC_BATCHING_INDEX(T, IdxT, Namespace, ...)                         \
@@ -57,16 +47,22 @@ namespace cuvs::neighbors::dynamic_batching {
 CUVS_INST_DYNAMIC_BATCHING_INDEX(float, int64_t, cuvs::neighbors::brute_force, index<float, float>);
 
 // CAGRA build and search with 32-bit indices
-CUVS_INST_DYNAMIC_BATCHING_INDEX(float, uint32_t, cuvs::neighbors::cagra, cagra_f32_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(half, uint32_t, cuvs::neighbors::cagra, cagra_f16_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(int8_t, uint32_t, cuvs::neighbors::cagra, cagra_i8_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(uint8_t, uint32_t, cuvs::neighbors::cagra, cagra_u8_u32_index);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(float, uint32_t, cuvs::neighbors::cagra, index<float, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(half, uint32_t, cuvs::neighbors::cagra, index<half, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(int8_t, uint32_t, cuvs::neighbors::cagra, index<int8_t, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(uint8_t,
+                                 uint32_t,
+                                 cuvs::neighbors::cagra,
+                                 index<uint8_t, uint32_t>);
 
 // CAGRA build with 32-bit indices, search with 64-bit indices
-CUVS_INST_DYNAMIC_BATCHING_INDEX(float, int64_t, cuvs::neighbors::cagra, cagra_f32_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(half, int64_t, cuvs::neighbors::cagra, cagra_f16_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(int8_t, int64_t, cuvs::neighbors::cagra, cagra_i8_u32_index);
-CUVS_INST_DYNAMIC_BATCHING_INDEX(uint8_t, int64_t, cuvs::neighbors::cagra, cagra_u8_u32_index);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(float, int64_t, cuvs::neighbors::cagra, index<float, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(half, int64_t, cuvs::neighbors::cagra, index<half, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(int8_t, int64_t, cuvs::neighbors::cagra, index<int8_t, uint32_t>);
+CUVS_INST_DYNAMIC_BATCHING_INDEX(uint8_t,
+                                 int64_t,
+                                 cuvs::neighbors::cagra,
+                                 index<uint8_t, uint32_t>);
 
 // IVF-PQ with 64-bit indices
 CUVS_INST_DYNAMIC_BATCHING_INDEX(float, int64_t, cuvs::neighbors::ivf_pq, index<int64_t>);

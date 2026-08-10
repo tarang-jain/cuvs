@@ -540,17 +540,10 @@ The following distance metrics are supported:
 `@auto_sync_resources`
 
 ```python
-def extend(ExtendParams params, Index index, extended_dataset, new_start_row, resources=None)
+def extend(ExtendParams params, Index index, additional_dataset, resources=None)
 ```
 
-Extend a CAGRA index with additional vectors.
-
-The caller owns dataset concatenation. Build a single padded device
-dataset of shape `(n_old + n_new, dim)` with the original vectors in
-rows `[0, new_start_row)` and the additional vectors in rows
-`[new_start_row, n_rows)`. `new_start_row` must equal the current index
-size. This function only extends the graph and rebinds the index to
-`extended_dataset`; keep that view alive for the index lifetime.
+Extend a CAGRA index with additional vectors
 
 **Parameters**
 
@@ -558,8 +551,7 @@ size. This function only extends the graph and rebinds the index to
 | --- | --- | --- |
 | `params` | `ExtendParams object` |  |
 | `index` | `Index` | Existing cagra index to extend |
-| `extended_dataset` | `PaddedDatasetView` | Caller-owned padded view already containing old \|\| new |
-| `new_start_row` | `int` | Row index where the additional vectors begin |
+| `additional_dataset` | `CUDA array interface compliant matrix shape` | Supported dtype [float, half, int8, uint8] |
 | `resources` | `cuvs.common.Resources, optional` |  |
 
 ## from_graph

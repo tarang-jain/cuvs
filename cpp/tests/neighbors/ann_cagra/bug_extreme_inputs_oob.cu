@@ -1,11 +1,10 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <gtest/gtest.h>
 
-#include "../cagra_padded_build_helpers.cuh"
 #include <cuvs/neighbors/cagra.hpp>
 
 #include <raft/core/device_mdarray.hpp>
@@ -31,9 +30,7 @@ class cagra_extreme_inputs_oob_test : public ::testing::Test {
     ix_ps.intermediate_graph_degree = 128;
 
     try {
-      cuvs::neighbors::test::padded_device_matrix_for_cagra<data_type> padded(
-        res, raft::make_const_mdspan(dataset->view()));
-      [[maybe_unused]] auto ix = cagra::build(res, ix_ps, padded.view);
+      [[maybe_unused]] auto ix = cagra::build(res, ix_ps, raft::make_const_mdspan(dataset->view()));
       raft::resource::sync_stream(res);
     } catch (const std::exception&) {
       SUCCEED();
