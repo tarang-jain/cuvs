@@ -2456,7 +2456,7 @@ auto iterative_build_graph(raft::resources const& res,
   // workspace so a too-small pool fails here. The owned search graph is allocated each iteration
   // at the current size and released after search, before the (often larger) output graph is
   // allocated. Per-chunk search I/O is ordinary device memory.
-  constexpr uint64_t max_chunk_size = 8192;
+  constexpr uint64_t max_chunk_size = helpers::kIterativeBuildChunkSize;
   // +1 because the search may return the query node itself as a neighbor;
   // this is consistent with the per-iteration curr_topk = next_graph_degree + 1
   auto topk             = intermediate_degree + 1;
