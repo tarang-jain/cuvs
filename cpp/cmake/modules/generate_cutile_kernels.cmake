@@ -50,7 +50,7 @@ function(_cutile_kernels_setup)
     return()
   endif()
 
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  cuvs_find_build_python(Python3_EXECUTABLE)
 
   find_program(
     CUTILE_BIN2C
@@ -199,7 +199,7 @@ function(process_cutile_matrix_entry source_list_var)
   cmake_parse_arguments(_CUTILE "${options}" "${one_value}" "${multi_value}" ${ARGN})
 
   if(NOT Python3_EXECUTABLE)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    cuvs_find_build_python(Python3_EXECUTABLE)
   endif()
 
   populate_matrix_variables("${_CUTILE_MATRIX_JSON_ENTRY}")
@@ -207,11 +207,13 @@ function(process_cutile_matrix_entry source_list_var)
   if(register STREQUAL "cubin")
     string(CONFIGURE "${_CUTILE_FRAGMENT_TAG_FORMAT_CUBIN}" fragment_tag @ONLY)
     set(bin2c_symbol embedded_cubin)
-    set(fragment_entry_type "StaticCubinFragmentEntry<fragment_tag>")
+    set(fragment_entry_type "cuvs::detail::jit_lto::StaticCubinFragmentEntry<fragment_tag>")
   elseif(register STREQUAL "tileir")
     string(CONFIGURE "${_CUTILE_FRAGMENT_TAG_FORMAT_TILEIR}" fragment_tag @ONLY)
     set(bin2c_symbol embedded_tileir)
-    set(fragment_entry_type "StaticTileIrBytecodeFragmentEntry<fragment_tag>")
+    set(fragment_entry_type
+        "cuvs::detail::jit_lto::StaticTileIrBytecodeFragmentEntry<fragment_tag>"
+    )
   else()
     message(FATAL_ERROR "Unknown cuTile register kind '${register}'")
   endif()

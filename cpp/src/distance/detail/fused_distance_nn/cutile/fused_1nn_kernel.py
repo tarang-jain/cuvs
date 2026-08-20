@@ -82,7 +82,9 @@ def make_kernel(
 
         def reduce_scores(dists, indices):
             def red_op(a_score, a_idx, b_score, b_idx):
-                cond = a_score < b_score
+                cond = (a_score < b_score) | (
+                    (a_score == b_score) & (a_idx < b_idx)
+                )
                 return (
                     ct.where(cond, a_score, b_score),
                     ct.where(cond, a_idx, b_idx),
@@ -96,9 +98,18 @@ def make_kernel(
                 keepdims=True,
             )
 
+        def sum_values(a, b):
+            return a + b
+
+        use_tf32 = A.dtype == ct.float32
+        if use_tf32:
+            rounded_a_norm = ct.full((tm, 1), 0, dtype=acc_dtype)
+
         local_indices = ct.arange(tn, dtype=ct.int16)[None, :]
         for n in range(num_tiles_n):
             accumulator = ct.full((tm, tn), 0, dtype=acc_dtype)
+            if use_tf32:
+                rounded_b_norm = ct.full((1, tn), 0, dtype=acc_dtype)
             for k in range(num_tiles_k):
                 dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype
                 a = ct.load(
@@ -112,13 +123,31 @@ def make_kernel(
                     order=(1, 0),
                 ).astype(dtype)
                 accumulator = ct.mma(a, b_T, accumulator)
+                if use_tf32:
+                    a_fp32 = a.astype(acc_dtype)
+                    b_fp32 = b_T.astype(acc_dtype)
+                    if n == 0:
+                        rounded_a_norm += ct.reduce(
+                            a_fp32 * a_fp32, 1, sum_values, 0.0, keepdims=True
+                        )
+                    rounded_b_norm += ct.reduce(
+                        b_fp32 * b_fp32, 0, sum_values, 0.0, keepdims=True
+                    )
 
             if metric_code == METRIC_INNER_PRODUCT:
                 score = -accumulator
             else:
-                b_norm = ct.load(
-                    B_norm, index=(n,), shape=(tn,), padding_mode=zero_pad
-                )
+                if use_tf32:
+                    b_norm = rounded_b_norm.reshape((tn,))
+                    b_norm = ct.where(
+                        metric_code == METRIC_COSINE_EXPANDED,
+                        ct.sqrt(b_norm),
+                        b_norm,
+                    )
+                else:
+                    b_norm = ct.load(
+                        B_norm, index=(n,), shape=(tn,), padding_mode=zero_pad
+                    )
                 if metric_code == METRIC_L2_EXPANDED:
                     # L2 receives squared row norms; cosine receives L2 magnitudes.
                     # The A norm is constant across centroids. Reduce
@@ -143,9 +172,16 @@ def make_kernel(
         if metric_code == METRIC_INNER_PRODUCT:
             out_dist = -best_dist
         else:
-            a_norm = ct.load(
-                A_norm, index=(bidm,), shape=(tm,), padding_mode=zero_pad
-            )[:, None]
+            if use_tf32:
+                a_norm = ct.where(
+                    metric_code == METRIC_COSINE_EXPANDED,
+                    ct.sqrt(rounded_a_norm),
+                    rounded_a_norm,
+                )
+            else:
+                a_norm = ct.load(
+                    A_norm, index=(bidm,), shape=(tm,), padding_mode=zero_pad
+                )[:, None]
             if metric_code == METRIC_L2_EXPANDED:
                 out_dist = a_norm + 2.0 * best_dist
                 out_dist = ct.where(

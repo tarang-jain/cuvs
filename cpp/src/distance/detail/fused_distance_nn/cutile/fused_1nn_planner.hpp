@@ -7,7 +7,7 @@
 
 #include <type_traits>
 
-#include <cuvs/detail/jit_lto/AlgorithmPlanner.hpp>
+#include <cuvs/detail/jit_lto/TileAlgorithmPlanner.hpp>
 #include <cuvs/detail/jit_lto/common_fragments.hpp>
 #include <cuvs/detail/jit_lto/cutile_arch_tags.hpp>
 #include <cuvs/detail/jit_lto/fused_distance_nn/fused_1nn_fragments.hpp>
@@ -35,14 +35,14 @@ inline const char* fused_1nn_kernel_entrypoint()
 }
 
 template <typename DataT, typename AbiTag>
-struct Fused1nnTilePlanner : TileAlgorithmPlanner {
+struct Fused1nnTilePlanner : cuvs::detail::jit_lto::TileAlgorithmPlanner {
   using DataTag  = fused_1nn_data_tag_t<DataT>;
   using IndexTag = cuvs::neighbors::detail::tag_index_i32;
 
-  inline static LauncherJitCache launcher_jit_cache{};
+  inline static cuvs::detail::jit_lto::TileLauncherCache launcher_cache{};
 
   Fused1nnTilePlanner()
-    : TileAlgorithmPlanner(fused_1nn_kernel_entrypoint<DataTag, AbiTag>(), launcher_jit_cache)
+    : TileAlgorithmPlanner(fused_1nn_kernel_entrypoint<DataTag, AbiTag>(), launcher_cache)
   {
   }
 

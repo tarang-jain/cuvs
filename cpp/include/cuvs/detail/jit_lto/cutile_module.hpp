@@ -14,11 +14,11 @@
 
 #include <cuda_runtime.h>
 
-#include <cuvs/detail/jit_lto/AlgorithmLauncher.hpp>
-#include <cuvs/detail/jit_lto/FragmentEntry.hpp>
+#include <cuvs/detail/jit_lto/CutileFragmentEntry.hpp>
 #include <cuvs/detail/jit_lto/tileir_compat.hpp>
 
 #include <raft/util/cuda_rt_essentials.hpp>
+#include <rtcx/algorithm_launcher.hpp>
 
 namespace cuvs::detail::jit_lto {
 
@@ -78,8 +78,8 @@ inline std::optional<CutileModuleImage> resolve_cutile_module_image(
   return std::nullopt;
 }
 
-inline std::shared_ptr<AlgorithmLauncher> load_cutile_launcher(const CutileModuleImage& image,
-                                                               const std::string& kernel_symbol)
+inline std::shared_ptr<rtcx::algorithm_launcher> load_cutile_launcher(
+  const CutileModuleImage& image, const std::string& kernel_symbol)
 {
   cudaLibrary_t library{};
   RAFT_CUDA_TRY(
@@ -88,7 +88,7 @@ inline std::shared_ptr<AlgorithmLauncher> load_cutile_launcher(const CutileModul
   cudaKernel_t kernel{};
   RAFT_CUDA_TRY(cudaLibraryGetKernel(&kernel, library, kernel_symbol.c_str()));
 
-  return std::make_shared<AlgorithmLauncher>(kernel, library);
+  return std::make_shared<rtcx::algorithm_launcher>(kernel, library);
 }
 
 }  // namespace cuvs::detail::jit_lto

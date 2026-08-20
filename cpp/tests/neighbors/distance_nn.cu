@@ -14,6 +14,8 @@
 #include <raft/linalg/unary_op.cuh>
 #include <raft/matrix/init.cuh>
 
+#include <algorithm>
+
 namespace cuvs::neighbors {
 
 enum class ImplType { fused, unfused };
@@ -159,6 +161,10 @@ class NNTest : public ::testing::TestWithParam<NNInputs<IdxT>> {
     if constexpr (impl == ImplType::fused) {
       vector_compare_soa(
         handle, ref_out.data_handle(), out_idx.data_handle(), out_dist.data_handle(), m, summary);
+      // FP32 Tensor Core inputs are rounded to TF32, so near-tied candidates may select a
+      // different valid nearest neighbor than the full-FP32 reference.
+      const auto allowed_misses = std::max<IdxT>(1, (m + 499) / 500);
+      ASSERT_LE(summary.n_misses, allowed_misses) << summary;
     } else {
       vector_compare(handle, ref_out.data_handle(), out_kvp.data_handle(), m, summary);
     }
@@ -194,7 +200,6 @@ const std::vector<NNInputs<IdxT>> input_fp32 = {
   {4096, 16384, 128, DistanceType::L2Expanded, true, uint64_t(31415926), 0.1},
   {4096, 4096, 64, DistanceType::L2SqrtExpanded, false, uint64_t(31415926), 0.1},
   {4096, 16384, 128, DistanceType::L2SqrtExpanded, false, uint64_t(31415926), 0.1},
-  {512, 1024, 64, DistanceType::InnerProduct, false, uint64_t(31415926), 0.1},
   {4096, 4096, 64, DistanceType::CosineExpanded, false, uint64_t(31415926), 0.1},
   {8192, 4096, 64, DistanceType::CosineExpanded, false, uint64_t(31415926), 0.1},
   // Fused implementation for cosine distance ignores the sqrt parameter, therefore
@@ -202,6 +207,19 @@ const std::vector<NNInputs<IdxT>> input_fp32 = {
   // {4096, 4096, 128, DistanceType::CosineExpanded, true, uint64_t(31415926), 0.1},
   // {4096, 8192, 128, DistanceType::CosineExpanded, true, uint64_t(31415926), 0.1},
 };
+
+template <typename IdxT>
+const std::vector<NNInputs<IdxT>> input_fp32_fused = [] {
+  auto inputs = input_fp32<IdxT>;
+  inputs.insert(
+    inputs.begin() + 6,
+    NNInputs<IdxT>{512, 1024, 64, DistanceType::InnerProduct, false, uint64_t(31415926), 0.1});
+  inputs.push_back(
+    NNInputs<IdxT>{1000, 8, 32, DistanceType::L2Expanded, false, uint64_t(31415926), 0.1});
+  inputs.push_back(
+    NNInputs<IdxT>{1000, 40, 16, DistanceType::CosineExpanded, false, uint64_t(31415926), 0.1});
+  return inputs;
+}();
 
 // Test fused implementation with single-precision
 typedef NNTest<float, float, int32_t, ImplType::fused> NNTest_fp32_fused;
@@ -211,7 +229,7 @@ TEST_P(NNTest_fp32_fused, test)
   this->compare();
 }
 
-INSTANTIATE_TEST_CASE_P(NNTest, NNTest_fp32_fused, ::testing::ValuesIn(input_fp32<int>));
+INSTANTIATE_TEST_CASE_P(NNTest, NNTest_fp32_fused, ::testing::ValuesIn(input_fp32_fused<int>));
 
 // Test unfused implementation with single-precision
 typedef NNTest<float, float, int32_t, ImplType::unfused> NNTest_fp32_unfused;

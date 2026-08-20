@@ -46,8 +46,8 @@ bool launch_fused_1nn_tile(IdxT* nearest_idx,
   Fused1nnTilePlanner<DataT, AbiTag> planner;
   planner.add_entrypoint();
   planner.add_tileir_fallback();
-  const CutileTileConfig tile_cfg = planner.tile_config();
-  auto launcher                   = planner.try_get_launcher();
+  const cuvs::detail::jit_lto::CutileTileConfig tile_cfg = planner.tile_config();
+  auto launcher                                          = planner.try_get_launcher();
   if (!launcher) { return false; }
 
   int metric_code;
@@ -84,16 +84,13 @@ bool launch_fused_1nn_tile(IdxT* nearest_idx,
   IdxT N = n;
   IdxT K = k;
 
-  void* x_ptr  = const_cast<DataT*>(x);
-  void* y_ptr  = const_cast<DataT*>(y);
-  void* xn_ptr = const_cast<DataT*>(xn);
-  void* yn_ptr = const_cast<DataT*>(yn);
-  // OutIdx must be a valid device pointer for the launch ABI; when store_idx is 0 the kernel
-  // does not write it (dist-only callers pass nearest_dist as a stand-in).
+  void* x_ptr          = const_cast<DataT*>(x);
+  void* y_ptr          = const_cast<DataT*>(y);
+  void* xn_ptr         = const_cast<DataT*>(xn);
+  void* yn_ptr         = const_cast<DataT*>(yn);
   const IdxT store_idx = nearest_idx != nullptr ? IdxT{1} : IdxT{0};
-  void* idx_ptr =
-    nearest_idx != nullptr ? static_cast<void*>(nearest_idx) : static_cast<void*>(nearest_dist);
-  void* dist_ptr = nearest_dist;
+  void* idx_ptr        = nearest_idx;
+  void* dist_ptr       = nearest_dist;
 
   const int tile_m = tile_cfg.tile_m;
   dim3 grid((static_cast<uint64_t>(m) + tile_m - 1) / tile_m, 1, 1);
