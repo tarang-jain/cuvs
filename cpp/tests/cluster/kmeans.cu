@@ -549,6 +549,53 @@ class KmeansFitBatchedTest : public ::testing::TestWithParam<KmeansBatchedInputs
     ASSERT_LE(inertia_full, inertia_default * (T(1) + rel));
   }
 
+  T fitDeviceWithInitSize(int64_t init_size_value)
+  {
+    int n_features = testparams.n_col;
+    int n_clusters = testparams.n_clusters;
+    auto stream    = raft::resource::get_cuda_stream(handle);
+
+    cuvs::cluster::kmeans::params p;
+    p.n_clusters          = n_clusters;
+    p.tol                 = testparams.tol;
+    p.n_init              = 1;
+    p.init                = cuvs::cluster::kmeans::params::KMeansPlusPlus;
+    p.max_iter            = 20;
+    p.rng_state.seed      = 1;
+    p.oversampling_factor = 0;
+    p.init_size           = init_size_value;
+
+    auto d_centroids_buf = raft::make_device_matrix<T, int>(handle, n_clusters, n_features);
+    T inertia            = 0;
+    int n_iter           = 0;
+    cuvs::cluster::kmeans::fit(handle,
+                               p,
+                               raft::make_const_mdspan(d_X->view()),
+                               std::optional<raft::device_vector_view<const T, int>>{std::nullopt},
+                               d_centroids_buf.view(),
+                               raft::make_host_scalar_view<T>(&inertia),
+                               raft::make_host_scalar_view<int>(&n_iter));
+    raft::resource::sync_stream(handle, stream);
+    return inertia;
+  }
+
+  void runDeviceInitSizeCompare()
+  {
+    int n_samples  = testparams.n_row;
+    int n_clusters = testparams.n_clusters;
+
+    T inertia_default = fitDeviceWithInitSize(0);
+    T inertia_full    = fitDeviceWithInitSize(n_samples);
+    T inertia_subset  = fitDeviceWithInitSize(std::min(3 * n_clusters, n_samples));
+
+    ASSERT_TRUE(std::isfinite(inertia_default));
+    ASSERT_TRUE(std::isfinite(inertia_full));
+    ASSERT_TRUE(std::isfinite(inertia_subset));
+    ASSERT_GT(inertia_subset, T(0));
+    // Both values use all rows; allow normal GPU reduction-order variation between fits.
+    ASSERT_NEAR(inertia_default, inertia_full, std::abs(inertia_default) * T(1e-2));
+  }
+
   T fitKMeansPlusPlus(int n_init_value)
   {
     int n_features = testparams.n_col;
@@ -683,6 +730,7 @@ TEST_P(KmeansFitBatchedTestF, Result)
   ASSERT_TRUE(score >= 0.99);
   ASSERT_TRUE(inertia_match);
   runInitSizeCompare();
+  runDeviceInitSizeCompare();
   runMultiSeedCheck();
   runZeroCost();
 }
@@ -695,6 +743,7 @@ TEST_P(KmeansFitBatchedTestD, Result)
   ASSERT_TRUE(score >= 0.99);
   ASSERT_TRUE(inertia_match);
   runInitSizeCompare();
+  runDeviceInitSizeCompare();
   runMultiSeedCheck();
   runZeroCost();
 }

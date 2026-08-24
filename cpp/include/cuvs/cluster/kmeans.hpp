@@ -127,11 +127,9 @@ struct params : base_params {
    * Number of samples to randomly draw for the KMeansPlusPlus initialization
    * step. A random subset of this size is used for centroid seeding.
    *
-   * Only applies when dataset is on host; for device data the full dataset
-   * is always used for seeding and this parameter is ignored.
-   *
    * When set to 0 (default) with host data uses `min(3 * n_clusters, n_samples)`
-   * as a default.
+   * as a default. With device data, 0 uses the full dataset. Set a positive
+   * value to explicitly seed from a random subset on either host or device.
    *
    * In Batched multi-GPU host-data fits, the effective KMeansPlusPlus initialization
    * sample is materialized on device on every rank. Every rank must have enough
