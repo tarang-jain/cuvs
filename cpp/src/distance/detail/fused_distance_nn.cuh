@@ -1,11 +1,12 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
 
 #include "distance_ops/l2_exp.cuh"  // ops::l2_exp_distance_op
+#include "fused_distance_nn/cutile/fused_1nn_tile.hpp"
 #include "fused_distance_nn/cutlass_base.cuh"
 #include "fused_distance_nn/fused_cosine_nn.cuh"
 #include "fused_distance_nn/fused_l2_nn.cuh"
@@ -20,12 +21,55 @@
 #include <raft/util/cuda_utils.cuh>      // raft::ceildiv, raft::shfl
 
 #include <cstddef>  // size_t
-#include <limits>   // std::numeric_limits
+#include <cstdint>
+#include <limits>  // std::numeric_limits
 
 namespace cuvs {
 namespace distance {
 
 namespace detail {
+
+/** Explicit implementation selected for the fused 1-NN primitive. */
+enum class Fused1nnBackend : std::uint8_t {
+  Cutile,
+  Cutlass,
+  Unfused,
+};
+
+/** Tuning used only by the bounded-workspace unfused backend. */
+struct UnfusedTop1nnTuning {
+  std::size_t row_tile       = 8192;
+  std::size_t candidate_tile = 8192;
+};
+
+struct Top1nnTuning {
+  UnfusedTop1nnTuning unfused{};
+};
+
+/**
+ * Output-independent backend probe. Call this before allocating backend-native result storage.
+ * cuTile delegates to its launcher/ABI probe; CUTLASS is available for the legacy L2/cosine
+ * fused primitive only.
+ */
+template <typename DataT, typename IdxT>
+bool can_launch_fused_1nn_backend(Fused1nnBackend backend,
+                                  const DataT* x,
+                                  const DataT* y,
+                                  IdxT m,
+                                  IdxT n,
+                                  IdxT k,
+                                  cuvs::distance::DistanceType metric)
+{
+  if (backend == Fused1nnBackend::Cutile) {
+    if constexpr (is_fused_1nn_cutile_data_v<DataT>) {
+      return can_launch_fused_1nn_tile(x, y, m, n, k, metric);
+    }
+    return false;
+  }
+  return (backend == Fused1nnBackend::Cutlass || backend == Fused1nnBackend::Unfused) &&
+         metric != cuvs::distance::DistanceType::InnerProduct && x != nullptr && y != nullptr &&
+         m > 0 && n > 0 && k > 0;
+}
 
 template <typename DataT,
           typename OutT,
