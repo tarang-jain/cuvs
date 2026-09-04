@@ -376,6 +376,8 @@ auto calc_minibatch_size(const raft::resources& handle,
               bytes += sizeof(raft::KeyValuePair<IdxT, MathT>);
             }
             break;
+          case FusedDistancePath::Auto:
+            RAFT_FAIL("Fused distance backend must be resolved before estimating workspace");
         }
         return bytes;
       };
