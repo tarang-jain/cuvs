@@ -510,6 +510,17 @@ void minClusterDistanceCompute(raft::resources const& handle,
   }
 
   if (uses_fused_distance_nn(fused_path)) {
+    if constexpr (std::is_same_v<IndexT, int64_t>) {
+      if (cutile_ready) {
+        const auto required_workspace_bytes =
+          sizeof(int) *
+          cuvs::distance::detail::fused_1nn_cutile_index_workspace_rows<DataT>(n_samples);
+        if (workspace.size() < required_workspace_bytes) {
+          workspace.resize(required_workspace_bytes, stream);
+        }
+      }
+    }
+
     const DataT* x_norm_ptr = L2NormX.data_handle();
     const DataT* centroids_norm_ptr;
     if constexpr (std::is_same_v<DataT, float>) {
@@ -569,8 +580,8 @@ void minClusterDistanceCompute(raft::resources const& handle,
                                               n_clusters,
                                               n_features,
                                               tuning,
-                                              nullptr,
-                                              0,
+                                              workspace.data(),
+                                              workspace.size(),
                                               metric != cuvs::distance::DistanceType::L2Expanded,
                                               false,
                                               true,
