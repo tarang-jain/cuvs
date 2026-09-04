@@ -1176,6 +1176,7 @@ if(NOT BUILD_CPU_ONLY)
     set(CUVS_CUTILE_ENABLED 0)
   endif()
   target_compile_definitions(cuvs_cpp_headers INTERFACE CUVS_CUTILE_ENABLED=${CUVS_CUTILE_ENABLED})
+  cutile_target_compile_definitions(cuvs_cpp_headers INTERFACE)
 
   set(fused_1nn_cutile_dir
       "${CMAKE_CURRENT_SOURCE_DIR}/src/distance/detail/fused_distance_nn/cutile"
@@ -1266,6 +1267,7 @@ if(NOT BUILD_CPU_ONLY)
     set(CUVS_CUTILE_ENABLED 0)
   endif()
   target_compile_definitions(cuvs_cpp_headers INTERFACE CUVS_CUTILE_ENABLED=${CUVS_CUTILE_ENABLED})
+  cutile_target_compile_definitions(cuvs_cpp_headers INTERFACE)
 
   generate_inst_matrix(
     cagra_build_inst_files

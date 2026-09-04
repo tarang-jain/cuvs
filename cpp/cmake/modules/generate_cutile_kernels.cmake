@@ -9,6 +9,44 @@ include_guard(GLOBAL)
 
 include(${CMAKE_CURRENT_LIST_DIR}/compute_matrix_product.cmake)
 
+set(CUVS_CUTILE_ARCHITECTURES
+    ""
+    CACHE STRING
+          "Semicolon-separated SM versions whose cuTile cubins are embedded (empty embeds all)"
+)
+
+function(_cutile_arch_is_enabled output_var gpu_code)
+  string(REGEX REPLACE "^sm_" "" _cutile_arch "${gpu_code}")
+  if(CUVS_CUTILE_ARCHITECTURES STREQUAL "")
+    set(_cutile_enabled TRUE)
+  else()
+    list(FIND CUVS_CUTILE_ARCHITECTURES "${_cutile_arch}" _cutile_arch_index)
+    if(_cutile_arch_index EQUAL -1)
+      set(_cutile_enabled FALSE)
+    else()
+      set(_cutile_enabled TRUE)
+    endif()
+  endif()
+  set(${output_var}
+      ${_cutile_enabled}
+      PARENT_SCOPE
+  )
+endfunction()
+
+function(cutile_target_compile_definitions target visibility)
+  foreach(_cutile_arch IN ITEMS 80 86 90 100 120)
+    _cutile_arch_is_enabled(_cutile_enabled "sm_${_cutile_arch}")
+    if(_cutile_enabled)
+      set(_cutile_enabled_value 1)
+    else()
+      set(_cutile_enabled_value 0)
+    endif()
+    target_compile_definitions(
+      ${target} ${visibility} CUVS_CUTILE_EMBED_SM_${_cutile_arch}=${_cutile_enabled_value}
+    )
+  endforeach()
+endfunction()
+
 function(_cutile_fragment_tag_header_files output_var)
   set(${output_var} "")
   foreach(_header IN LISTS ARGN)
@@ -243,6 +281,13 @@ function(process_cutile_matrix_entry source_list_var)
   endif()
 
   populate_matrix_variables("${_CUTILE_MATRIX_JSON_ENTRY}")
+
+  if(register STREQUAL "cubin")
+    _cutile_arch_is_enabled(_cutile_arch_enabled "${gpu_code}")
+    if(NOT _cutile_arch_enabled)
+      return()
+    endif()
+  endif()
 
   if(register STREQUAL "cubin")
     string(CONFIGURE "${_CUTILE_FRAGMENT_TAG_FORMAT_CUBIN}" fragment_tag @ONLY)

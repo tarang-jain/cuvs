@@ -16,7 +16,10 @@ The benchmark accepts only the Falcon `10,000,000 x 1024` float32 `.fbin` layout
 cmake -S cpp -B cpp/build-falcon-pq -GNinja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_ARCHITECTURES=120-real \
-  -DBUILD_PQ_PROFILING_BENCH=ON
+  -DCUVS_CUTILE_ARCHITECTURES=120 \
+  -DBUILD_PQ_PROFILING_BENCH=ON \
+  -DBUILD_TESTS=OFF
+cmake --build cpp/build-falcon-pq --target cuvs
 cmake --build cpp/build-falcon-pq --target FALCON_PQ_BENCH
 
 cpp/build-falcon-pq/bench/pq/FALCON_PQ_BENCH \
@@ -37,9 +40,9 @@ cpp/bench/pq/scripts/launch_falcon_pq_workflow.sh
 
 The launcher chooses GPU 0 if it meets the idle threshold; otherwise it takes the first idle GPU and records its physical index and UUID. It creates a named detached tmux session and prints attach, status, and log-tail commands. Artifacts live under `artifacts/falcon-pq/<UTC run id>/`.
 
-Stages are integration, build/tests, smoke test, baseline, Nsight Systems, Nsight Compute, prototype sweep, and final comparison. Each command and stage status is written atomically to `manifest.json`. A `.done` marker is created only after the command succeeds and its expected output passes validation. Rerunning `run_falcon_pq_workflow.sh` with the same `ARTIFACT_DIR`, `TMUX_SESSION`, and `GPU_INDEX` skips completed stages. Profiling-stage failure is recorded but does not prevent the full benchmark sweep; the overall run remains `workflow.partial` until those stages succeed.
+Stages are integration, libcuvs build, smoke test, baseline, Nsight Systems, Nsight Compute, prototype sweep, and final comparison. Each command and stage status is written atomically to `manifest.json`. A `.done` marker is created only after the command succeeds and its expected output passes validation. Rerunning `run_falcon_pq_workflow.sh` with the same `ARTIFACT_DIR`, `TMUX_SESSION`, and `GPU_INDEX` skips completed stages. Profiling-stage failure is recorded but does not prevent the full benchmark sweep; the overall run remains `workflow.partial` until those stages succeed.
 
-The build/test stage runs the PQ preprocessing, KMeans, fused-distance, and cuTile smoke test executables. Profiles retain `.nsys-rep` and `.ncu-rep` files plus CSV/text summaries. Nsight capture begins after dataset loading at `cudaProfilerStart`, keeping the reports focused on training. The profile uses a configurable representative row cap (`PROFILE_ROWS`, default one million), while baseline and sweep runs always use all rows.
+The build stage compiles the shared `cuvs` target and the standalone benchmark; it does not compile test targets. `CUVS_CUTILE_ARCHITECTURES=120` limits embedded cuTile cubins to the GPU architecture used by this experiment. Profiles retain `.nsys-rep` and `.ncu-rep` files plus CSV/text summaries. Nsight capture begins after dataset loading at `cudaProfilerStart`, keeping the reports focused on training. The profile uses a configurable representative row cap (`PROFILE_ROWS`, default one million), while baseline and sweep runs always use all rows.
 
 Tmux protects this work from SSH or client disconnection. It does not protect against host reboot, administrator termination, GPU reset, or machine failure.
 

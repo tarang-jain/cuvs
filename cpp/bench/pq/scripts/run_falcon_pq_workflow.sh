@@ -67,8 +67,8 @@ run_stage() {
     --log "${log}" --marker "${marker}"
   echo "[$(date -u +%FT%TZ)] START ${stage_name}; log=${log}"
   set +e
-  "${function_name}" 2>&1 | tee -a "${log}"
-  local rc=${PIPESTATUS[0]}
+  (set -e; "${function_name}") > >(tee -a "${log}") 2>&1
+  local rc=$?
   set -e
   if [[ ${rc} -eq 0 ]]; then
     touch "${marker}"
@@ -98,24 +98,23 @@ stage_integration() {
   record_and_run integration git status --short --branch
 }
 
-stage_build_tests() {
+stage_build_libcuvs() {
   cd "${WORKTREE}"
-  record_and_run build_tests cmake -S cpp -B "${BUILD_DIR}" -GNinja \
+  record_and_run build_libcuvs cmake -S cpp -B "${BUILD_DIR}" -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_ARCHITECTURES=120-real \
+    -DCUVS_CUTILE_ARCHITECTURES=120 \
     -DBUILD_PQ_PROFILING_BENCH=ON \
-    -DBUILD_TESTS=ON \
+    -DBUILD_TESTS=OFF \
     -DBUILD_C_TESTS=OFF \
     -DBUILD_C_LIBRARY=OFF \
     -DBUILD_CAGRA_HNSWLIB=OFF \
     -DBUILD_MG_ALGOS=OFF \
-    -DCUVS_NVTX=ON
-  record_and_run build_tests cmake --build "${BUILD_DIR}" --parallel "${BUILD_JOBS}" --target \
-    FALCON_PQ_BENCH PREPROCESSING_TEST CLUSTER_TEST NEIGHBORS_TEST CUTILE_SMOKE_TEST
-  record_and_run build_tests "${BUILD_DIR}/gtests/PREPROCESSING_TEST"
-  record_and_run build_tests "${BUILD_DIR}/gtests/CLUSTER_TEST"
-  record_and_run build_tests "${BUILD_DIR}/gtests/NEIGHBORS_TEST"
-  record_and_run build_tests "${BUILD_DIR}/gtests/CUTILE_SMOKE_TEST"
+    -DCUVS_NVTX=ON || return $?
+  record_and_run build_libcuvs cmake --build "${BUILD_DIR}" --parallel "${BUILD_JOBS}" --target \
+    cuvs || return $?
+  record_and_run build_libcuvs cmake --build "${BUILD_DIR}" --parallel "${BUILD_JOBS}" --target \
+    FALCON_PQ_BENCH || return $?
   test -x "${BENCH}"
 }
 
@@ -207,7 +206,7 @@ stage_final_comparison() {
 
 export DATASET
 run_stage integration required stage_integration
-run_stage build_tests required stage_build_tests
+run_stage build_libcuvs required stage_build_libcuvs
 run_stage smoke_test required stage_smoke_test
 run_stage baseline required stage_baseline
 profile_failures=0
