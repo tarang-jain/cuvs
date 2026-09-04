@@ -17,8 +17,6 @@
 #include <raft/linalg/map.cuh>
 #include <raft/util/cuda_utils.cuh>
 
-#include <rmm/device_uvector.hpp>
-
 #include <cub/util_type.cuh>
 
 #include <stdint.h>
@@ -389,9 +387,19 @@ void top_1_nn(raft::resources const& handle,
               cudaStream_t stream)
 {
   RAFT_EXPECTS(is_row_major, "fusedDistanceNN only supports row-major inputs");
+  RAFT_EXPECTS(backend != detail::Fused1nnBackend::Auto,
+               "top_1_nn requires AUTO to be resolved before dispatch");
   if (backend == detail::Fused1nnBackend::Cutile) {
+    RAFT_EXPECTS(cutlass_kvp_output == nullptr,
+                 "cuTile top_1_nn requires its native separate output arrays");
     if constexpr (detail::is_fused_1nn_cutile_data_v<DataT> &&
                   std::is_same_v<NormT, detail::fused_1nn_cutile_norm_t<DataT>>) {
+      if constexpr (std::is_same_v<IdxT, int64_t>) {
+        const auto required_workspace_bytes =
+          sizeof(int) * detail::fused_1nn_cutile_index_workspace_rows<DataT>(m);
+        RAFT_EXPECTS(workspace != nullptr && workspace_bytes >= required_workspace_bytes,
+                     "cuTile top_1_nn workspace is too small for int64 output batching");
+      }
       const bool launched = detail::try_fused_1nn_tile<DataT, IdxT>(
         nearest_idx, nearest_dist, x, y, xn, yn, m, n, k, metric, sqrt, workspace, stream);
       RAFT_EXPECTS(launched,
@@ -405,6 +413,8 @@ void top_1_nn(raft::resources const& handle,
                "Requested fused 1-NN backend is unavailable for this input");
   RAFT_EXPECTS(metric != cuvs::distance::DistanceType::InnerProduct,
                "Only cuTile top_1_nn supports InnerProduct (as a maximum reduction)");
+  RAFT_EXPECTS(nearest_idx == nullptr && nearest_dist == nullptr,
+               "CUTLASS and unfused top_1_nn require their native KVP output buffer");
   constexpr bool matching_norm_type = std::is_same_v<NormT, DataT>;
   RAFT_EXPECTS(matching_norm_type, "CUTLASS and unfused top_1_nn require matching norm types");
   if constexpr (matching_norm_type) {
@@ -419,21 +429,31 @@ void top_1_nn(raft::resources const& handle,
       const auto row_tile = static_cast<IdxT>(std::min(tuning.unfused.row_tile, max_row_tile));
       const auto candidate_tile =
         static_cast<IdxT>(std::min(tuning.unfused.candidate_tile, max_candidate_tile));
-      const auto required_workspace_bytes = static_cast<std::size_t>(row_tile) *
+      const auto distance_workspace_bytes = static_cast<std::size_t>(row_tile) *
                                             static_cast<std::size_t>(candidate_tile) *
                                             sizeof(DataT);
+      const auto candidate_min_offset =
+        raft::alignTo(distance_workspace_bytes, alignof(raft::KeyValuePair<IdxT, DataT>));
+      const auto candidate_min_bytes =
+        candidate_tile < n
+          ? static_cast<std::size_t>(row_tile) * sizeof(raft::KeyValuePair<IdxT, DataT>)
+          : std::size_t{0};
+      const auto required_workspace_bytes = candidate_min_offset + candidate_min_bytes;
       RAFT_EXPECTS(workspace != nullptr && workspace_bytes >= required_workspace_bytes,
                    "Unfused top_1_nn workspace is smaller than its configured tile");
 
       using KeyValueT = raft::KeyValuePair<IdxT, DataT>;
-      rmm::device_uvector<KeyValueT> candidate_min(candidate_tile < n ? row_tile : 0, stream);
+      auto* candidate_min =
+        candidate_tile < n
+          ? reinterpret_cast<KeyValueT*>(static_cast<std::byte*>(workspace) + candidate_min_offset)
+          : nullptr;
       for (IdxT row_offset = 0; row_offset < m; row_offset += row_tile) {
         const auto rows = std::min(row_tile, static_cast<IdxT>(m - row_offset));
         auto output =
           raft::make_device_vector_view<KeyValueT, IdxT>(cutlass_kvp_output + row_offset, rows);
         for (IdxT candidate_offset = 0; candidate_offset < n; candidate_offset += candidate_tile) {
           const auto candidates = std::min(candidate_tile, static_cast<IdxT>(n - candidate_offset));
-          auto* tile_output = candidate_offset == 0 ? output.data_handle() : candidate_min.data();
+          auto* tile_output     = candidate_offset == 0 ? output.data_handle() : candidate_min;
           unfusedDistanceNNMinReduce<DataT, DataT, KeyValueT, IdxT>(
             handle,
             tile_output,
@@ -453,7 +473,7 @@ void top_1_nn(raft::resources const& handle,
             stream);
           if (candidate_offset != 0) {
             auto candidate_output =
-              raft::make_device_vector_view<const KeyValueT, IdxT>(candidate_min.data(), rows);
+              raft::make_device_vector_view<const KeyValueT, IdxT>(candidate_min, rows);
             raft::linalg::map(
               handle,
               output,
@@ -471,6 +491,9 @@ void top_1_nn(raft::resources const& handle,
     RAFT_EXPECTS(backend == detail::Fused1nnBackend::Cutlass, "Unknown fused 1-NN backend");
     RAFT_EXPECTS(cutlass_kvp_output != nullptr,
                  "CUTLASS fused 1-NN requires its native KVP output buffer");
+    RAFT_EXPECTS(
+      workspace != nullptr && workspace_bytes >= sizeof(int) * static_cast<std::size_t>(m),
+      "CUTLASS top_1_nn workspace is too small");
     MinAndDistanceReduceOp<IdxT, DataT> red_op;
     KVPMinReduce<IdxT, DataT> pair_red_op;
     fusedDistanceNN<DataT, raft::KeyValuePair<IdxT, DataT>, IdxT>(cutlass_kvp_output,

@@ -291,9 +291,8 @@ bool can_launch_fused_1nn_tile(IdxT* nearest_idx,
   if (!can_launch_fused_1nn_tile(nearest_idx, nearest_dist, x, y, m, n, k, metric)) {
     return false;
   }
-  if (metric != cuvs::distance::DistanceType::InnerProduct && (xn == nullptr || yn == nullptr)) {
-    return false;
-  }
+  if (metric == cuvs::distance::DistanceType::InnerProduct) { return true; }
+  if (xn == nullptr || yn == nullptr) { return false; }
   if (!is_16_byte_aligned(xn) || !is_16_byte_aligned(yn)) { return false; }
   const auto xn_bytes   = checked_tensor_bytes(m, IdxT{1}, sizeof(*xn));
   const auto yn_bytes   = checked_tensor_bytes(n, IdxT{1}, sizeof(*yn));

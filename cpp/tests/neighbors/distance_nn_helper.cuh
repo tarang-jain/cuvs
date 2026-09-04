@@ -73,6 +73,28 @@ RAFT_KERNEL ref_nn_kernel(
   IdxT tid = threadIdx.x + blockIdx.x * IdxT(blockDim.x);
 
   for (IdxT m = tid; m < M; m += (blockDim.x * gridDim.x)) {
+    if (metric == DistanceType::InnerProduct) {
+      IdxT max_index = N + 1;
+      AccT max_score = min_val<AccT>();
+      for (IdxT n = 0; n < N; n++) {
+        AccT score = AccT(0.0);
+        for (IdxT k = 0; k < K; k++) {
+          score += AccT(A[m * K + k]) * AccT(B[n * K + k]);
+        }
+        if (score > max_score) {
+          max_score = score;
+          max_index = n;
+        }
+      }
+      if constexpr (std::is_fundamental<OutT>::value) {
+        out[m] = max_score;
+      } else {
+        out[m].key   = max_index;
+        out[m].value = max_score;
+      }
+      continue;
+    }
+
     IdxT min_index = N + 1;
     AccT min_dist  = max_val<AccT>();
 

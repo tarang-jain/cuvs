@@ -102,10 +102,15 @@ class NNTest : public ::testing::TestWithParam<NNInputs<IdxT>> {
     }
 
     if constexpr (impl == ImplType::fused) {
-      workspace_size = m * sizeof(IdxT);
+      workspace_size = m * sizeof(int);
       if (backend == cuvs::distance::detail::Fused1nnBackend::Unfused) {
-        workspace_size = std::min<std::size_t>(m, tuning.unfused.row_tile) *
-                         std::min<std::size_t>(n, tuning.unfused.candidate_tile) * sizeof(AccT);
+        using KvpT                = raft::KeyValuePair<IdxT, AccT>;
+        const auto row_tile       = std::min<std::size_t>(m, tuning.unfused.row_tile);
+        const auto candidate_tile = std::min<std::size_t>(n, tuning.unfused.candidate_tile);
+        const auto distance_bytes = row_tile * candidate_tile * sizeof(AccT);
+        workspace_size =
+          raft::alignTo(distance_bytes, alignof(KvpT)) +
+          (candidate_tile < static_cast<std::size_t>(n) ? row_tile * sizeof(KvpT) : std::size_t{0});
       }
     } else if constexpr (impl == ImplType::unfused) {
       workspace_size = m * n * sizeof(AccT);
