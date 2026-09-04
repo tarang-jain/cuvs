@@ -51,6 +51,7 @@ option(BUILD_SHARED_LIBS "Build cuvs shared libraries" ON)
 option(BUILD_TESTS "Build cuvs unit-tests" ON)
 option(BUILD_C_LIBRARY "Build cuVS C API library" ON)
 option(BUILD_CUVS_BENCH "Build cuVS ann benchmarks" OFF)
+option(BUILD_PQ_PROFILING_BENCH "Build the standalone Falcon PQ profiling benchmark" OFF)
 option(BUILD_CAGRA_HNSWLIB "Build CAGRA+hnswlib interface" ON)
 option(BUILD_MG_ALGOS "Build with multi-GPU support" ON)
 option(BUILD_MNMG_TESTS
@@ -1865,4 +1866,8 @@ endif()
 
 if(BUILD_CUVS_BENCH)
   add_subdirectory(bench/ann/)
+endif()
+
+if(BUILD_PQ_PROFILING_BENCH)
+  add_subdirectory(bench/pq/)
 endif()

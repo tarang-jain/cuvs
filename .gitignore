@@ -11,6 +11,7 @@ __pycache__
 .coverage
 .vscode
 *.swp
+/cpp/build-falcon-pq/
 *.pytest_cache
 htmlcov
 build/
@@ -55,6 +56,9 @@ _skbuild
 *.qdrep.cache
 *.qdstrm
 *.nvprof
+*.nsys-rep
+*.ncu-rep
+/artifacts/falcon-pq/
 
 ## doxygen build check inside ci/checks/style.sh
 doxygen_check/
