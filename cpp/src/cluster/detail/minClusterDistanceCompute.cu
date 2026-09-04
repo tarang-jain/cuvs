@@ -10,12 +10,122 @@
 #include <raft/linalg/coalesced_reduction.cuh>
 #include <raft/matrix/init.cuh>
 
+#include <cstdlib>
+#include <cstring>
 #include <mma.h>
 #include <type_traits>
 
 namespace cuvs::cluster::kmeans::detail {
 
 namespace {
+
+constexpr int small_dim_1nn_clusters         = 256;
+constexpr int small_dim_1nn_threads          = 256;
+constexpr int small_dim_1nn_warps            = small_dim_1nn_threads / raft::WarpSize;
+constexpr int small_dim_1nn_samples_per_warp = 64;
+constexpr int small_dim_1nn_samples_per_block =
+  small_dim_1nn_warps * small_dim_1nn_samples_per_warp;
+constexpr int64_t small_dim_1nn_min_samples = 65536;
+
+bool small_dim_1nn_enabled()
+{
+  static const bool enabled = [] {
+    const char* value = std::getenv("CUVS_KMEANS_SMALL_DIM_1NN");
+    return value != nullptr && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+template <typename IndexT>
+__global__ __launch_bounds__(small_dim_1nn_threads) void small_dim_1nn_l2_kernel(
+  const float* samples,
+  const float* centroids,
+  IndexT n_samples,
+  IndexT* nearest_idx,
+  float* nearest_dist,
+  raft::KeyValuePair<IndexT, float>* nearest_kvp)
+{
+  // Transpose the 256 row-major float2 centroids while staging them. Each warp can then read a
+  // coordinate for 32 consecutive centroids without shared-memory bank conflicts.
+  __shared__ float centroid_coords[2][small_dim_1nn_clusters];
+  const int tid           = threadIdx.x;
+  const float2 centroid   = reinterpret_cast<const float2*>(centroids)[tid];
+  centroid_coords[0][tid] = centroid.x;
+  centroid_coords[1][tid] = centroid.y;
+  __syncthreads();
+
+  const int lane               = tid % raft::WarpSize;
+  const int warp               = tid / raft::WarpSize;
+  constexpr unsigned full_mask = 0xffffffffu;
+  const IndexT sample_block =
+    static_cast<IndexT>(blockIdx.x) * static_cast<IndexT>(small_dim_1nn_samples_per_block);
+
+  for (int sample_iter = 0; sample_iter < small_dim_1nn_samples_per_warp; ++sample_iter) {
+    const IndexT sample_idx =
+      sample_block + static_cast<IndexT>(sample_iter * small_dim_1nn_warps + warp);
+    if (sample_idx >= n_samples) { continue; }
+
+    float sample_x = 0.0f;
+    float sample_y = 0.0f;
+    if (lane == 0) {
+      const float2 sample = reinterpret_cast<const float2*>(samples)[sample_idx];
+      sample_x            = sample.x;
+      sample_y            = sample.y;
+    }
+    sample_x = __shfl_sync(full_mask, sample_x, 0);
+    sample_y = __shfl_sync(full_mask, sample_y, 0);
+
+    float best_dist = CUDART_INF_F;
+    int best_idx    = 0;
+#pragma unroll
+    for (int centroid_idx = lane; centroid_idx < small_dim_1nn_clusters;
+         centroid_idx += raft::WarpSize) {
+      const float dx   = sample_x - centroid_coords[0][centroid_idx];
+      const float dy   = sample_y - centroid_coords[1][centroid_idx];
+      const float dist = fmaf(dx, dx, dy * dy);
+      if (dist < best_dist || (dist == best_dist && centroid_idx < best_idx)) {
+        best_dist = dist;
+        best_idx  = centroid_idx;
+      }
+    }
+
+#pragma unroll
+    for (int offset = raft::WarpSize / 2; offset > 0; offset /= 2) {
+      const float other_dist = __shfl_down_sync(full_mask, best_dist, offset);
+      const int other_idx    = __shfl_down_sync(full_mask, best_idx, offset);
+      if (other_dist < best_dist || (other_dist == best_dist && other_idx < best_idx)) {
+        best_dist = other_dist;
+        best_idx  = other_idx;
+      }
+    }
+
+    if (lane == 0) {
+      if (nearest_kvp != nullptr) {
+        nearest_kvp[sample_idx] =
+          raft::KeyValuePair<IndexT, float>(static_cast<IndexT>(best_idx), best_dist);
+      } else {
+        nearest_idx[sample_idx]  = static_cast<IndexT>(best_idx);
+        nearest_dist[sample_idx] = best_dist;
+      }
+    }
+  }
+}
+
+template <typename IndexT>
+void launch_small_dim_1nn_l2(const float* samples,
+                             const float* centroids,
+                             IndexT n_samples,
+                             IndexT* nearest_idx,
+                             float* nearest_dist,
+                             raft::KeyValuePair<IndexT, float>* nearest_kvp,
+                             cudaStream_t stream)
+{
+  const auto blocks = static_cast<unsigned int>(
+    raft::ceildiv<IndexT>(n_samples, static_cast<IndexT>(small_dim_1nn_samples_per_block)));
+  small_dim_1nn_l2_kernel<IndexT><<<blocks, small_dim_1nn_threads, 0, stream>>>(
+    samples, centroids, n_samples, nearest_idx, nearest_dist, nearest_kvp);
+  RAFT_CUDA_TRY(cudaPeekAtLastError());
+}
 
 __device__ __forceinline__ float round_to_tf32(float value)
 {
@@ -179,6 +289,22 @@ void min_cluster_and_distance_compute_impl(raft::resources const& handle,
                          metric == cuvs::distance::DistanceType::CosineExpanded;
   const auto fused_path   = requirements.path;
   const bool cutile_ready = fused_path == FusedDistancePath::Cutile;
+
+  if constexpr (std::is_same_v<DataT, float>) {
+    if (small_dim_1nn_enabled() && n_samples >= small_dim_1nn_min_samples && n_features == 2 &&
+        n_clusters == small_dim_1nn_clusters &&
+        metric == cuvs::distance::DistanceType::L2Expanded) {
+      launch_small_dim_1nn_l2<IndexT>(X.data_handle(),
+                                      centroids.data_handle(),
+                                      n_samples,
+                                      nearest_idx,
+                                      nearest_dist,
+                                      native_kvp,
+                                      stream);
+      return;
+    }
+  }
+
   if (workspace.size() < requirements.workspace_bytes) {
     workspace.resize(requirements.workspace_bytes, stream);
   }
