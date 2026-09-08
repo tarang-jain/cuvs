@@ -9,13 +9,11 @@ import numpy as np
 from cuvs.common cimport cydlpack
 from cuvs.common.dataset cimport (
     Dataset,
+    cuvsPqParams,
+    cuvsPqParamsCreate,
+    cuvsPqParamsDestroy,
     cuvsDatasetMakeStandardView,
-    cuvsDatasetMakeVpq,
-)
-from cuvs.neighbors.cagra.cagra cimport (
-    cuvsCagraCompressionParams,
-    cuvsCagraCompressionParamsCreate,
-    cuvsCagraCompressionParamsDestroy,
+    cuvsDatasetMakePq,
 )
 
 from pylibraft.common import auto_convert_output, device_ndarray
@@ -33,18 +31,18 @@ PQ_KMEANS_TYPES = {
 PQ_KMEANS_NAMES = {v: k for k, v in PQ_KMEANS_TYPES.items()}
 
 
-cdef class VpqParams:
-    """Parameters for creating a CAGRA-Q VPQ dataset."""
+cdef class PqParams:
+    """Parameters for creating a PQ-compressed dataset."""
 
-    cdef cuvsCagraCompressionParams* params
+    cdef cuvsPqParams* params
 
     def __cinit__(self):
         self.params = NULL
-        check_cuvs(cuvsCagraCompressionParamsCreate(&self.params))
+        check_cuvs(cuvsPqParamsCreate(&self.params))
 
     def __dealloc__(self):
         if self.params != NULL:
-            cuvsCagraCompressionParamsDestroy(self.params)
+            cuvsPqParamsDestroy(self.params)
 
     def __init__(self, *, pq_bits=8, pq_dim=0, vq_n_centers=0,
                  kmeans_n_iters=25, vq_kmeans_trainset_fraction=0.0,
@@ -416,10 +414,10 @@ def inverse_transform(Quantizer quantizer, codes, output=None, vq_labels=None, r
 
 
 @auto_sync_resources
-def make_vpq_dataset(VpqParams params, dataset, resources=None):
-    """Create an owning device VPQ dataset for iterative CAGRA-Q."""
+def make_pq_dataset(PqParams params, dataset, resources=None):
+    """Create an owning device PQ dataset for iterative CAGRA-Q."""
     cdef Dataset dense
-    cdef Dataset vpq = Dataset()
+    cdef Dataset pq = Dataset()
     cdef cuvsResources_t res = <cuvsResources_t>resources.get_c_obj()
     cdef cydlpack.DLManagedTensor* dataset_dlpack = NULL
 
@@ -436,6 +434,6 @@ def make_vpq_dataset(VpqParams params, dataset, resources=None):
         check_cuvs(cuvsDatasetMakeStandardView(
             res, dataset_dlpack, &dense.dataset))
 
-    check_cuvs(cuvsDatasetMakeVpq(
-        res, params.params, dense.dataset, &vpq.dataset))
-    return vpq
+    check_cuvs(cuvsDatasetMakePq(
+        res, params.params, dense.dataset, &pq.dataset))
+    return pq

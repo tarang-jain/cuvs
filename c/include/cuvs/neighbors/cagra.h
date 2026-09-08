@@ -117,6 +117,7 @@ struct cuvsCagraCompressionParams {
    */
   double pq_kmeans_trainset_fraction;
 };
+typedef struct cuvsCagraCompressionParams* cuvsCagraCompressionParams_t;
 
 struct cuvsIvfPqParams {
   cuvsIvfPqIndexParams_t ivf_pq_build_params;
@@ -680,9 +681,9 @@ CUVS_EXPORT cuvsError_t cuvsCagraUpdateDataset(cuvsResources_t res,
  * cuvsError_t res_destroy_status = cuvsResourcesDestroy(res);
  * @endcode
  *
- * A `CUVS_DATASET_LAYOUT_VPQ` dataset created by `cuvsDatasetMakeVpq` builds an iterative CAGRA-Q
- * index. VPQ input requires `L2Expanded` and `ITERATIVE_CAGRA_SEARCH` (or `AUTO_SELECT`), and the
- * VPQ dataset must outlive the index because the index stores a non-owning view.
+ * A `CUVS_DATASET_LAYOUT_PQ` dataset created by `cuvsDatasetMakePq` builds an iterative CAGRA-Q
+ * index. PQ input requires `L2Expanded` and `ITERATIVE_CAGRA_SEARCH` (or `AUTO_SELECT`), and the
+ * PQ dataset must outlive the index because the index stores a non-owning view.
  *
  * @param[in] res cuvsResources_t opaque C handle
  * @param[in] params cuvsCagraIndexParams_t used to build CAGRA index

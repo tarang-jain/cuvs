@@ -21,7 +21,7 @@ extern "C" {
 typedef enum {
   CUVS_DATASET_LAYOUT_STANDARD = 0,
   CUVS_DATASET_LAYOUT_PADDED   = 1,
-  CUVS_DATASET_LAYOUT_VPQ = 2
+  CUVS_DATASET_LAYOUT_PQ       = 2
 } cuvsDatasetLayout_t;
 
 /**
@@ -49,8 +49,34 @@ typedef struct {
 } cuvsDataset;
 typedef cuvsDataset* cuvsDataset_t;
 
-struct cuvsCagraCompressionParams;
-typedef struct cuvsCagraCompressionParams* cuvsCagraCompressionParams_t;
+/** Parameters for creating a PQ-compressed dataset. */
+struct cuvsPqParams {
+  /**
+   * The bit length of each encoded PQ element. Possible values are [4, 5, 6, 7, 8].
+   * Smaller values reduce index size and can improve search performance at the cost of recall.
+   */
+  uint32_t pq_bits;
+  /**
+   * The dimensionality of the vector after PQ compression. When zero, a heuristic selects it.
+   * The source dimension must currently be a multiple of `pq_dim`.
+   */
+  uint32_t pq_dim;
+  /** VQ codebook size. When zero, a heuristic selects the number of coarse cluster centers. */
+  uint32_t vq_n_centers;
+  /** Number of k-means iterations for both VQ and PQ training. */
+  uint32_t kmeans_n_iters;
+  /** Fraction of the input used for VQ k-means training. Zero selects a heuristic value. */
+  double vq_kmeans_trainset_fraction;
+  /** Fraction of the input used for PQ k-means training. Zero selects a heuristic value. */
+  double pq_kmeans_trainset_fraction;
+};
+typedef struct cuvsPqParams* cuvsPqParams_t;
+
+/** @brief Allocate PQ parameters and populate them with defaults. */
+CUVS_EXPORT cuvsError_t cuvsPqParamsCreate(cuvsPqParams_t* params);
+
+/** @brief Destroy PQ parameters. */
+CUVS_EXPORT cuvsError_t cuvsPqParamsDestroy(cuvsPqParams_t params);
 
 /**
  * @brief Create an empty owning dataset handle.
@@ -77,12 +103,12 @@ CUVS_EXPORT cuvsError_t cuvsDatasetMakePadded(cuvsResources_t res,
                                               cuvsDataset_t* padded_dataset);
 
 /**
- * @brief Compress a dense dataset into a device VPQ dataset.
+ * @brief Compress a dense dataset into a device PQ dataset.
  */
-CUVS_EXPORT cuvsError_t cuvsDatasetMakeVpq(cuvsResources_t res,
-                                           cuvsCagraCompressionParams_t params,
-                                           cuvsDataset_t dataset,
-                                           cuvsDataset_t* vpq_dataset);
+CUVS_EXPORT cuvsError_t cuvsDatasetMakePq(cuvsResources_t res,
+                                          cuvsPqParams_t params,
+                                          cuvsDataset_t dataset,
+                                          cuvsDataset_t* pq_dataset);
 
 /**
  * @brief Create a non-owning padded dataset view from a host- or device-resident tensor.
