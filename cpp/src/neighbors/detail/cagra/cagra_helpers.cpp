@@ -368,21 +368,17 @@ inline std::pair<size_t, size_t> iterative_build_mem_usage(
   const size_t topk = intermediate_graph_degree + 1;
 
   // The dataset stays resident on the device for the whole build: either VPQ-compressed, or padded
-  // to CAGRA's row alignment.
+  // to CAGRA's row alignment. A maximum-size padded query buffer is allocated up front; PQ
+  // queries are reconstructed into it, while dense queries use their existing padded rows.
+  const size_t stride =
+    cuvs::neighbors::cagra_required_row_width(static_cast<uint32_t>(dim), dtype_size);
   size_t dataset_dev;
-  size_t query_scratch;
   if (compression.has_value()) {
     dataset_dev = vpq_dataset_size(dataset, compression.value());
-    // Queries are reconstructed from the codes one chunk at a time rather than materialized for
-    // the whole dataset.
-    query_scratch = chunk * dim * dtype_size;
   } else {
-    const size_t stride =
-      cuvs::neighbors::cagra_required_row_width(static_cast<uint32_t>(dim), dtype_size);
     dataset_dev = n_rows * stride * dtype_size;
-    // Padded rows are depadded into a per-chunk scratch buffer before being used as queries.
-    query_scratch = stride == dim ? 0 : chunk * dim * dtype_size;
   }
+  const size_t query_scratch = chunk * stride * dtype_size;
 
   // Search results for one chunk, live for the whole loop.
   size_t results_dev = chunk * topk * kIndexSize;  // dev_neighbors
@@ -414,11 +410,6 @@ inline std::pair<size_t, size_t> iterative_build_mem_usage(
   // optimize workspace never coexist and are combined with max() rather than summed. The query
   // scratch is not part of that: search_and_optimize holds it at function scope, so it is still
   // alive while optimize runs.
-  //
-  // Two transients are left out. The dataset copy made by make_device_padded_dataset briefly
-  // coexists with its source, and cagra::search re-pads a query chunk when its rows are not
-  // CAGRA-aligned; both are caller-owned or chunk-sized, and counting them would inflate the
-  // estimate enough to push callers to an out-of-core build unnecessarily.
   size_t total_dev = dataset_dev + results_dev + graph_dev + knn_dev + query_scratch +
                      std::max(search_dev, gpu_workspace_size);
 

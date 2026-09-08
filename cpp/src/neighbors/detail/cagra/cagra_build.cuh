@@ -6,6 +6,7 @@
 
 #include "../../../core/nvtx.hpp"
 #include "../../ivf_pq/ivf_pq_fp16_overflow.cuh"
+#include "cagra_search.cuh"
 #include "graph_core.cuh"
 
 #include <raft/core/copy.cuh>
@@ -2001,6 +2002,7 @@ __global__ void kern_reconstruct_vpq_queries(const uint8_t* encoded_data,
                                              uint32_t pq_len,
                                              uint64_t offset,
                                              uint32_t batch_size,
+                                             uint32_t output_stride,
                                              T* output)
 {
   const uint64_t batch_idx = blockIdx.x;
@@ -2016,16 +2018,16 @@ __global__ void kern_reconstruct_vpq_queries(const uint8_t* encoded_data,
     uint32_t k = d % pq_len;
     float val  = static_cast<float>(vq_centroid_ptr[d]) +
                 static_cast<float>(pq_codebook[static_cast<uint32_t>(pq_codes[j]) * pq_len + k]);
-    output[batch_idx * dim + d] = static_cast<T>(val);
+    output[batch_idx * output_stride + d] = static_cast<T>(val);
   }
 }
 
-template <typename T, typename MathT, typename IdxT>
+template <typename T, typename MathT, typename IdxT, typename LayoutPolicy>
 void reconstruct_vpq_queries(raft::resources const& res,
                              const cuvs::neighbors::device_vpq_dataset<MathT, IdxT>& vpq_dset,
                              uint64_t offset,
                              uint32_t batch_size,
-                             raft::device_matrix_view<T, int64_t> output)
+                             raft::device_matrix_view<T, int64_t, LayoutPolicy> output)
 {
   const uint32_t dim     = vpq_dset.dim();
   const uint32_t pq_len  = vpq_dset.pq_len();
@@ -2041,6 +2043,7 @@ void reconstruct_vpq_queries(raft::resources const& res,
       pq_len,
       offset,
       batch_size,
+      static_cast<uint32_t>(output.stride(0)),
       output.data_handle());
 }
 
@@ -2053,7 +2056,7 @@ void reconstruct_vpq_queries(raft::resources const& res,
 //   - `vpq_queries != nullptr`: `dev_query_view` is ignored and each chunk of queries is
 //     reconstructed on the fly from the VPQ codes into a small reusable scratch buffer, so we
 //     never materialize the whole (up to N x dim) reconstructed dataset.
-template <typename T, typename IdxT, typename DatasetViewT>
+template <typename T, typename IdxT, typename DatasetViewT, typename QueryLayout>
 raft::device_matrix<IdxT, int64_t> search_and_optimize(
   raft::resources const& res,
   const cuvs::neighbors::cagra::search_params& search_params,
@@ -2061,6 +2064,8 @@ raft::device_matrix<IdxT, int64_t> search_and_optimize(
   raft::device_matrix_view<const T, int64_t> dev_query_view,
   raft::device_matrix_view<IdxT, int64_t> dev_neighbors,
   raft::device_matrix_view<float, int64_t> dev_distances,
+  raft::device_matrix_view<IdxT, int64_t> dev_knn_graph,
+  raft::device_matrix_view<T, int64_t, QueryLayout> batch_queries,
   raft::device_matrix<IdxT, int64_t> prev_graph,
   const cuvs::neighbors::device_vpq_dataset<half, int64_t>* vpq_queries,
   size_t curr_query_size,
@@ -2072,33 +2077,23 @@ raft::device_matrix<IdxT, int64_t> search_and_optimize(
 {
   auto stream = raft::resource::get_cuda_stream(res);
 
-  // These buffers scale with N (e.g. N * (intermediate_degree+1) for the kNN graph). Allocate them
-  // from the default device resource (a pool over device memory): allocating from the large
-  // workspace resource here would use an unpooled managed_memory_resource, paying a synchronous
-  // cudaMallocManaged/cudaFree every iteration for multi-GB buffers.
-  auto dev_knn_graph = raft::make_device_matrix<IdxT, int64_t>(res, curr_query_size, curr_topk);
-
-  // Scratch for one reconstructed or depadded chunk. Reused across chunks; safe because all
-  // reconstruct/search/copy work is serialized on `stream`.
-  auto batch_queries =
-    vpq_queries != nullptr || dev_query_view.extent(1) != query_dim
-      ? raft::make_device_matrix<T, int64_t>(res, static_cast<int64_t>(max_chunk_size), query_dim)
-      : raft::make_device_matrix<T, int64_t>(res, 0, 0);
-
-  auto run_batch = [&](int64_t offset,
-                       int64_t batch_size,
-                       raft::device_matrix_view<const T, int64_t> batch_query_view) {
+  auto run_batch = [&](int64_t offset, int64_t batch_size, auto batch_query_view) {
     auto batch_dev_neighbors_view = raft::make_device_matrix_view<IdxT, int64_t>(
       dev_neighbors.data_handle(), batch_size, curr_topk);
     auto batch_dev_distances_view = raft::make_device_matrix_view<float, int64_t>(
       dev_distances.data_handle(), batch_size, curr_topk);
 
-    cuvs::neighbors::cagra::search(res,
-                                   search_params,
-                                   idx,
-                                   batch_query_view,
-                                   batch_dev_neighbors_view,
-                                   batch_dev_distances_view);
+    cuvs::neighbors::cagra::detail::search_main<T,
+                                                IdxT,
+                                                cuvs::neighbors::filtering::none_sample_filter,
+                                                IdxT,
+                                                float,
+                                                DatasetViewT>(res,
+                                                              search_params,
+                                                              idx,
+                                                              batch_query_view,
+                                                              batch_dev_neighbors_view,
+                                                              batch_dev_distances_view);
 
     raft::copy(dev_knn_graph.data_handle() + offset * curr_topk,
                batch_dev_neighbors_view.data_handle(),
@@ -2117,9 +2112,9 @@ raft::device_matrix<IdxT, int64_t> search_and_optimize(
                                                 *vpq_queries,
                                                 static_cast<uint64_t>(offset),
                                                 static_cast<uint32_t>(batch_size),
-                                                batch_queries.view());
-      auto batch_query_view = raft::make_device_matrix_view<const T, int64_t>(
-        batch_queries.data_handle(), batch_size, query_dim);
+                                                batch_queries);
+      auto batch_query_view = raft::make_device_strided_matrix_view<const T, int64_t>(
+        batch_queries.data_handle(), batch_size, query_dim, batch_queries.stride(0));
       run_batch(offset, batch_size, batch_query_view);
     }
   } else {
@@ -2133,21 +2128,8 @@ raft::device_matrix<IdxT, int64_t> search_and_optimize(
       stream,
       raft::resource::get_workspace_resource_ref(res));
     for (const auto& batch : query_batch) {
-      raft::device_matrix_view<const T, int64_t> batch_query_view;
-      if (source_row_width != query_dim) {
-        raft::copy_matrix(batch_queries.data_handle(),
-                          query_dim,
-                          batch.data(),
-                          source_row_width,
-                          query_dim,
-                          batch.size(),
-                          stream);
-        batch_query_view = raft::make_device_matrix_view<const T, int64_t>(
-          batch_queries.data_handle(), static_cast<int64_t>(batch.size()), query_dim);
-      } else {
-        batch_query_view = raft::make_device_matrix_view<const T, int64_t>(
-          batch.data(), static_cast<int64_t>(batch.size()), query_dim);
-      }
+      auto batch_query_view = raft::make_device_strided_matrix_view<const T, int64_t>(
+        batch.data(), static_cast<int64_t>(batch.size()), query_dim, source_row_width);
       run_batch(
         static_cast<int64_t>(batch.offset()), static_cast<int64_t>(batch.size()), batch_query_view);
     }
@@ -2161,26 +2143,8 @@ raft::device_matrix<IdxT, int64_t> search_and_optimize(
   auto dev_output_graph =
     raft::make_device_matrix<IdxT, int64_t>(res, curr_query_size, next_graph_degree);
 
-  graph::optimize<IdxT>(res, dev_knn_graph.view(), dev_output_graph.view(), guarantee_connectivity);
+  graph::optimize<IdxT>(res, dev_knn_graph, dev_output_graph.view(), guarantee_connectivity);
   return dev_output_graph;
-}
-
-/** Upload and/or pad `dataset` to a device-resident CAGRA-aligned view for iterative internal
- * search. */
-template <typename T, typename DatasetViewT>
-  requires cuvs::neighbors::is_dense_row_major_dataset_view_v<DatasetViewT>
-auto ensure_device_padded_for_iterative_search(
-  raft::resources const& res,
-  DatasetViewT const& dataset,
-  std::unique_ptr<cuvs::neighbors::device_padded_dataset<T, int64_t>>& padded_own)
-  -> cuvs::neighbors::device_padded_dataset_view<T, int64_t>
-{
-  if constexpr (cuvs::neighbors::is_device_padded_dataset_view_v<DatasetViewT>) {
-    return dataset;
-  } else {
-    padded_own = cuvs::neighbors::make_device_padded_dataset(res, dataset.view());
-    return padded_own->as_dataset_view();
-  }
 }
 
 template <typename T, typename IdxT = uint32_t, typename DatasetViewT>
@@ -2201,25 +2165,28 @@ auto iterative_build_graph(raft::resources const& res,
 
   auto cagra_graph = raft::make_host_matrix<IdxT, int64_t>(0, 0);
 
-  // Iteratively improve the graph by repeatedly running CAGRA search and optimize. Dense inputs are
-  // padded on device; VPQ inputs are searched directly and reconstructed per query batch.
+  // Iteratively improve the graph by repeatedly running CAGRA search and optimize. Dense inputs
+  // must already be device-padded; PQ inputs are searched directly and reconstructed per query
+  // batch.
   RAFT_LOG_INFO("Iteratively creating/improving graph index using CAGRA's search() and optimize()");
 
-  std::unique_ptr<cuvs::neighbors::device_padded_dataset<T, int64_t>> padded_own;
   auto dev_dataset =
     raft::make_device_matrix_view<const T, int64_t>(static_cast<const T*>(nullptr), 0, 0);
-  uint32_t logical_dim = dataset.dim();
-  uint64_t final_graph_size;
+  uint32_t logical_dim                                                  = dataset.dim();
+  uint64_t final_graph_size                                             = 0;
   const cuvs::neighbors::device_vpq_dataset<half, int64_t>* vpq_dataset = nullptr;
 
   if constexpr (cuvs::neighbors::is_device_vpq_f16_dataset_view_v<DatasetViewT>) {
     final_graph_size = static_cast<uint64_t>(dataset.n_rows());
     vpq_dataset      = &dataset.dset();
+  } else if constexpr (cuvs::neighbors::is_device_padded_dataset_view_v<DatasetViewT>) {
+    dev_dataset      = dataset.view();
+    logical_dim      = dataset.dim();
+    final_graph_size = static_cast<uint64_t>(dataset.n_rows());
   } else {
-    auto search_dataset = ensure_device_padded_for_iterative_search<T>(res, dataset, padded_own);
-    dev_dataset         = search_dataset.view();
-    logical_dim         = search_dataset.dim();
-    final_graph_size    = static_cast<uint64_t>(search_dataset.n_rows());
+    RAFT_FAIL(
+      "Iterative CAGRA graph build requires a device-padded or PQ dataset. "
+      "Use make_device_padded_dataset() before build().");
   }
 
   // Determine initial graph size.
@@ -2236,6 +2203,13 @@ auto iterative_build_graph(raft::resources const& res,
   auto topk          = intermediate_degree + 1;
   auto dev_neighbors = raft::make_device_matrix<IdxT, int64_t>(res, max_chunk_size, topk);
   auto dev_distances = raft::make_device_matrix<float, int64_t>(res, max_chunk_size, topk);
+  // Allocate iteration scratch at its maximum size before the build starts. Besides avoiding
+  // repeated allocation, this fails before any expensive search work when memory is insufficient.
+  auto dev_knn_graph_storage =
+    raft::make_device_vector<IdxT, int64_t>(res, final_graph_size * topk);
+  auto const query_stride = cuvs::neighbors::cagra_required_row_width<T>(logical_dim);
+  auto batch_queries_storage =
+    raft::make_device_vector<T, int64_t>(res, static_cast<int64_t>(max_chunk_size) * query_stride);
 
   // Determine graph degree and number of search results while increasing
   // graph size.
@@ -2277,8 +2251,12 @@ auto iterative_build_graph(raft::resources const& res,
   bool flag_last       = false;
   auto curr_graph_size = initial_graph_size;
 
-  auto dev_graph        = raft::make_device_matrix<IdxT, int64_t>(res, 0, 0);
-  bool use_device_graph = false;
+  auto dev_graph =
+    raft::make_device_matrix<IdxT, int64_t>(res, initial_graph_size, small_graph_degree);
+  raft::copy(dev_graph.data_handle(),
+             cagra_graph.data_handle(),
+             cagra_graph.size(),
+             raft::resource::get_cuda_stream(res));
 
   while (true) {
     auto start           = std::chrono::high_resolution_clock::now();
@@ -2319,17 +2297,21 @@ auto iterative_build_graph(raft::resources const& res,
     cuvs::neighbors::cagra::search_params search_params = iter_params;
     search_params.max_queries                           = max_chunk_size;
     search_params.itopk_size                            = curr_itopk_size;
+    auto dev_knn_graph = raft::make_device_matrix_view<IdxT, int64_t>(
+      dev_knn_graph_storage.data_handle(), curr_query_size, curr_topk);
+    auto batch_queries =
+      raft::make_device_strided_matrix_view<T, int64_t>(batch_queries_storage.data_handle(),
+                                                        static_cast<int64_t>(max_chunk_size),
+                                                        logical_dim,
+                                                        query_stride);
 
     // Each index holds non-owning dataset and graph views. The local dataset owner and the graph
     // passed to search_and_optimize keep those views alive for the duration of the search.
     if (vpq_dataset != nullptr) {
       auto idx = cuvs::neighbors::cagra::vpq_f16_index<T, IdxT>(res, params.metric);
-      idx.update_device_dataset_same_layout(res, vpq_dataset->as_dataset_view());
-      if (use_device_graph) {
-        idx.update_graph(res, raft::make_const_mdspan(dev_graph.view()));
-      } else {
-        idx.update_graph(res, raft::make_const_mdspan(cagra_graph.view()));
-      }
+      idx =
+        cuvs::neighbors::cagra::update_dataset(res, std::move(idx), vpq_dataset->as_dataset_view());
+      idx.update_graph(res, raft::make_const_mdspan(dev_graph.view()));
 
       auto empty_query_view =
         raft::make_device_matrix_view<const T, int64_t>(static_cast<const T*>(nullptr), 0, 0);
@@ -2339,6 +2321,8 @@ auto iterative_build_graph(raft::resources const& res,
                                       empty_query_view,
                                       dev_neighbors.view(),
                                       dev_distances.view(),
+                                      dev_knn_graph,
+                                      batch_queries,
                                       std::move(dev_graph),
                                       vpq_dataset,
                                       curr_query_size,
@@ -2353,12 +2337,8 @@ auto iterative_build_graph(raft::resources const& res,
       cuvs::neighbors::device_padded_dataset_view<T, int64_t> sub_padded(dev_dataset_view,
                                                                          logical_dim);
       auto idx = cuvs::neighbors::cagra::device_padded_index<T, IdxT>(res, params.metric);
-      idx.update_device_dataset_same_layout(res, sub_padded);
-      if (use_device_graph) {
-        idx.update_graph(res, raft::make_const_mdspan(dev_graph.view()));
-      } else {
-        idx.update_graph(res, raft::make_const_mdspan(cagra_graph.view()));
-      }
+      idx      = cuvs::neighbors::cagra::update_dataset(res, std::move(idx), sub_padded);
+      idx.update_graph(res, raft::make_const_mdspan(dev_graph.view()));
 
       auto dev_query_view = raft::make_device_matrix_view<const T, int64_t>(
         dev_dataset.data_handle(), static_cast<int64_t>(curr_query_size), dev_dataset.extent(1));
@@ -2369,6 +2349,8 @@ auto iterative_build_graph(raft::resources const& res,
         dev_query_view,
         dev_neighbors.view(),
         dev_distances.view(),
+        dev_knn_graph,
+        batch_queries,
         std::move(dev_graph),
         static_cast<const cuvs::neighbors::device_vpq_dataset<half, int64_t>*>(nullptr),
         curr_query_size,
@@ -2378,7 +2360,6 @@ auto iterative_build_graph(raft::resources const& res,
         static_cast<int64_t>(logical_dim),
         flag_last && params.guarantee_connectivity);
     }
-    use_device_graph = true;
 
     auto end = std::chrono::high_resolution_clock::now();
     [[maybe_unused]] auto elapsed_ms =

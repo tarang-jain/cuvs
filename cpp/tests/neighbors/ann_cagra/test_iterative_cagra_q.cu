@@ -131,16 +131,16 @@ class CagraQCompressedTestBase : public ::testing::Test {
     dataset_.emplace(raft::make_device_matrix<float, int64_t>(res_, n_rows, dim));
     auto labels = raft::make_device_vector<int64_t, int64_t>(res_, n_rows);
     raft::random::make_blobs<float, int64_t, raft::row_major>(res_,
-                                                             dataset_->view(),
-                                                             labels.view(),
-                                                             5,             // clusters
-                                                             std::nullopt,  // random centers
-                                                             std::nullopt,  // scalar std
-                                                             1.0F,          // cluster std
-                                                             true,          // shuffle
-                                                             -10.0F,        // center box min
-                                                             10.0F,         // center box max
-                                                             1234ULL);
+                                                              dataset_->view(),
+                                                              labels.view(),
+                                                              5,             // clusters
+                                                              std::nullopt,  // random centers
+                                                              std::nullopt,  // scalar std
+                                                              1.0F,          // cluster std
+                                                              true,          // shuffle
+                                                              -10.0F,        // center box min
+                                                              10.0F,         // center box max
+                                                              1234ULL);
     raft::resource::sync_stream(res_);
   }
 
@@ -283,7 +283,7 @@ TEST_F(CagraQSerializeTest, RoundTripsThroughAFileWithItsDataset)
   EXPECT_EQ(mismatches, 0u) << mismatches << " of " << before.size() << " neighbour ids changed";
 }
 
-TEST_F(CagraQSerializeTest, RefusesToLoadWithoutItsDataset)
+TEST_F(CagraQSerializeTest, LoadsGraphWithoutDatasetAndAllowsReattachment)
 {
   auto compressed = compress(res_, dataset(), pq_dim);
   auto idx        = cagra::build(res_, iterative_params(), compressed.as_dataset_view());
@@ -291,10 +291,13 @@ TEST_F(CagraQSerializeTest, RefusesToLoadWithoutItsDataset)
   std::stringstream stored;
   cagra::serialize(res_, stored, idx);
 
-  // Dropping the rows on load is fine for a dense index, whose caller can attach its own copy, but
-  // it would leave a VPQ index unsearchable with no way back: the rows exist nowhere else.
   vpq_f16_index<float> restored{res_};
-  EXPECT_THROW(cagra::deserialize(res_, stored, &restored, nullptr), raft::exception);
+  cagra::deserialize(res_, stored, &restored, nullptr);
+
+  EXPECT_EQ(restored.size(), idx.size());
+  EXPECT_EQ(restored.dataset().n_rows(), 0);
+  restored = cagra::update_dataset(res_, std::move(restored), compressed.as_dataset_view());
+  EXPECT_EQ(neighbor_ids(res_, restored, queries(500)), neighbor_ids(res_, idx, queries(500)));
 }
 
 TEST_F(CagraQSerializeTest, SerializesTheGraphAloneWhenAsked)
