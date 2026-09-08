@@ -329,6 +329,10 @@ nlohmann::json collect_conf_with_prefix(const nlohmann::json& conf,
 }
 
 template <typename T, typename IdxT>
+void parse_search_param(const nlohmann::json& conf,
+                        typename cuvs::bench::cuvs_cagra<T, IdxT>::search_param& param);
+
+template <typename T, typename IdxT>
 void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index_params& params)
 {
   // NB: try to avoid setting parameters implicitly, because this parsing may be used after
@@ -410,24 +414,24 @@ void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index
       } else if constexpr (std::is_same_v<
                              U,
                              cuvs::neighbors::graph_build_params::iterative_search_params>) {
-        if (build_search_conf.contains("width")) {
-          arg.search_width = build_search_conf.at("width");
+        if (build_search_conf.contains("width") && !build_search_conf.contains("search_width")) {
+          build_search_conf["search_width"] = build_search_conf.at("width");
         }
-        if (build_search_conf.contains("max_iterations")) {
-          arg.max_iterations = build_search_conf.at("max_iterations");
-        }
+        build_search_conf.erase("persistent");
+        build_search_conf.erase("persistent_lifetime");
+        build_search_conf.erase("persistent_device_usage");
+        typename cuvs::bench::cuvs_cagra<T, IdxT>::search_param search_param;
+        search_param.p = arg;
+        parse_search_param<T, IdxT>(build_search_conf, search_param);
+        static_cast<cuvs::neighbors::cagra::search_params&>(arg) = search_param.p;
         if (build_search_conf.contains("min_iterations")) {
           arg.min_iterations = build_search_conf.at("min_iterations");
         }
-        if (build_search_conf.contains("itopk")) { arg.itopk_size = build_search_conf.at("itopk"); }
         if (build_search_conf.contains("max_queries")) {
           arg.max_queries = build_search_conf.at("max_queries");
         }
         if (build_search_conf.contains("team_size")) {
           arg.team_size = build_search_conf.at("team_size");
-        }
-        if (build_search_conf.contains("thread_block_size")) {
-          arg.thread_block_size = build_search_conf.at("thread_block_size");
         }
         if (build_search_conf.contains("hashmap_min_bitlen")) {
           arg.hashmap_min_bitlen = build_search_conf.at("hashmap_min_bitlen");
@@ -438,27 +442,7 @@ void parse_build_param(const nlohmann::json& conf, cuvs::neighbors::cagra::index
         if (build_search_conf.contains("num_random_samplings")) {
           arg.num_random_samplings = build_search_conf.at("num_random_samplings");
         }
-        if (build_search_conf.contains("persistent")) {
-          arg.persistent = build_search_conf.at("persistent");
-        }
-        if (build_search_conf.contains("persistent_lifetime")) {
-          arg.persistent_lifetime = build_search_conf.at("persistent_lifetime");
-        }
-        if (build_search_conf.contains("persistent_device_usage")) {
-          arg.persistent_device_usage = build_search_conf.at("persistent_device_usage");
-        }
-        if (build_search_conf.contains("algo")) {
-          std::string algo = build_search_conf.at("algo");
-          if (algo == "single_cta") {
-            arg.algo = cuvs::neighbors::cagra::search_algo::SINGLE_CTA;
-          } else if (algo == "multi_cta") {
-            arg.algo = cuvs::neighbors::cagra::search_algo::MULTI_CTA;
-          } else if (algo == "multi_kernel") {
-            arg.algo = cuvs::neighbors::cagra::search_algo::MULTI_KERNEL;
-          } else if (algo == "auto") {
-            arg.algo = cuvs::neighbors::cagra::search_algo::AUTO;
-          }
-        }
+
         if (build_search_conf.contains("hashmap_mode")) {
           std::string mode = build_search_conf.at("hashmap_mode");
           if (mode == "hash") {
