@@ -229,8 +229,8 @@ size_t search_plan_mem_usage(cuvs::neighbors::cagra::search_params params,
   // (_cuann_find_topk_bufferSize).
   constexpr size_t kTopkThreads   = 1024;
   constexpr size_t kTopkStateBits = 8;
-  dev += raft::div_rounding_up_safe(
-           raft::div_rounding_up_safe(num_intermediate, kTopkThreads), kTopkStateBits) *
+  dev += raft::div_rounding_up_safe(raft::div_rounding_up_safe(num_intermediate, kTopkThreads),
+                                    kTopkStateBits) *
          kTopkThreads * max_queries;
   return dev;
 }
@@ -401,7 +401,7 @@ inline std::pair<size_t, size_t> iterative_build_mem_usage(
   // CAGRA search parameter object. Mirror iterative_build_graph, which starts from the normal
   // CAGRA search defaults and then sets the per-iteration batch and top-k values.
   cuvs::neighbors::cagra::search_params search_params;
-  search_params.max_queries                           = chunk;
+  search_params.max_queries = chunk;
   const size_t search_dev =
     search_plan_mem_usage(search_params, chunk, topk + 32, graph_degree, n_rows, kIndexSize);
 

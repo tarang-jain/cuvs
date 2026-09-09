@@ -57,16 +57,16 @@ auto make_clustered(const raft::resources& res, int64_t n_rows, int64_t dim)
   auto dataset = raft::make_device_matrix<float, int64_t>(res, n_rows, dim);
   auto labels  = raft::make_device_vector<int64_t, int64_t>(res, n_rows);
   raft::random::make_blobs<float, int64_t, raft::row_major>(res,
-                                                           dataset.view(),
-                                                           labels.view(),
-                                                           5,             // clusters
-                                                           std::nullopt,  // random centers
-                                                           std::nullopt,  // scalar std
-                                                           1.0F,          // cluster std
-                                                           true,          // shuffle
-                                                           -10.0F,        // center box min
-                                                           10.0F,         // center box max
-                                                           1234ULL);
+                                                            dataset.view(),
+                                                            labels.view(),
+                                                            5,             // clusters
+                                                            std::nullopt,  // random centers
+                                                            std::nullopt,  // scalar std
+                                                            1.0F,          // cluster std
+                                                            true,          // shuffle
+                                                            -10.0F,        // center box min
+                                                            10.0F,         // center box max
+                                                            1234ULL);
   raft::resource::sync_stream(res);
   return dataset;
 }
@@ -85,7 +85,8 @@ auto device_estimate(const raft::resources& res,
                      int64_t n_rows,
                      int64_t dim,
                      const index_params& params,
-                     std::optional<cuvs::neighbors::vpq_params> compression = std::nullopt) -> size_t
+                     std::optional<cuvs::neighbors::vpq_params> compression = std::nullopt)
+  -> size_t
 {
   return helpers::cagra_build_mem_usage(
            res, extents_of(n_rows, dim), CUDA_R_32F, params, compression)
@@ -187,7 +188,7 @@ TEST(CagraMemUsage, IterativeEstimateCoversCoexistingBuffers)
 
   const size_t dataset_bytes = static_cast<size_t>(n_rows) * dim * sizeof(float);
   const size_t graph_bytes   = static_cast<size_t>(n_rows) * graph_degree * kIndexSize;
-  const size_t knn_bytes = static_cast<size_t>(n_rows) * (intermediate_degree + 1) * kIndexSize;
+  const size_t knn_bytes     = static_cast<size_t>(n_rows) * (intermediate_degree + 1) * kIndexSize;
 
   const auto estimated =
     device_estimate(res, n_rows, dim, iterative_params(graph_degree, intermediate_degree));
@@ -203,10 +204,8 @@ TEST(CagraMemUsage, IterativeEstimateGrowsWithDatasetAndDegree)
   constexpr int64_t dim = 128;
   const auto params     = iterative_params(64, 128);
 
-  EXPECT_GT(device_estimate(res, 2000000, dim, params),
-            device_estimate(res, 1000000, dim, params));
-  EXPECT_GT(device_estimate(res, 1000000, 256, params),
-            device_estimate(res, 1000000, dim, params));
+  EXPECT_GT(device_estimate(res, 2000000, dim, params), device_estimate(res, 1000000, dim, params));
+  EXPECT_GT(device_estimate(res, 1000000, 256, params), device_estimate(res, 1000000, dim, params));
   EXPECT_GT(device_estimate(res, 1000000, dim, iterative_params(128, 256)),
             device_estimate(res, 1000000, dim, params));
 }
