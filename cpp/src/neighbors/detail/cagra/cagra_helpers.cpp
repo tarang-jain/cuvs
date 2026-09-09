@@ -348,7 +348,7 @@ inline std::pair<size_t, size_t> nn_descent_build_mem_usage(raft::resources cons
 inline std::pair<size_t, size_t> iterative_build_mem_usage(
   raft::matrix_extent<int64_t> dataset,
   cudaDataType_t dtype,
-  cuvs::neighbors::graph_build_params::iterative_search_params params,
+  cuvs::neighbors::graph_build_params::iterative_search_params,
   size_t graph_degree,
   size_t intermediate_graph_degree,
   bool guarantee_connectivity,
@@ -397,7 +397,10 @@ inline std::pair<size_t, size_t> iterative_build_mem_usage(
 
   // The final iteration searches a graph_degree graph, requests topk neighbors and derives its
   // internal topk from that.
-  cuvs::neighbors::cagra::search_params search_params = params;
+  // On main, iterative_search_params is the common graph-build marker rather than a configurable
+  // CAGRA search parameter object. Mirror iterative_build_graph, which starts from the normal
+  // CAGRA search defaults and then sets the per-iteration batch and top-k values.
+  cuvs::neighbors::cagra::search_params search_params;
   search_params.max_queries                           = chunk;
   const size_t search_dev =
     search_plan_mem_usage(search_params, chunk, topk + 32, graph_degree, n_rows, kIndexSize);
