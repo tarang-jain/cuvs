@@ -153,30 +153,66 @@ result sequential(float const* host,
                   std::vector<std::vector<uint64_t>> const& batch_offsets,
                   cudaStream_t stream)
 {
-  device_array<float> input(size_t(batch_rows) * dim), output(size_t(batch_rows) * dim);
+  device_array<float> input0(size_t(batch_rows) * dim), input1(size_t(batch_rows) * dim);
+  device_array<float> output0(size_t(batch_rows) * dim), output1(size_t(batch_rows) * dim);
   device_array<uint32_t> d_labels(rows);
-  device_array<uint64_t> d_offsets(mesos);
-  device_array<unsigned long long> d_counts(mesos);
+  device_array<uint64_t> d_offsets0(mesos), d_offsets1(mesos);
+  device_array<unsigned long long> d_counts0(mesos), d_counts1(mesos);
+  cudaStream_t copy_stream;
+  cudaEvent_t ready[2], consumed[2];
+  CUDA_TRY(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
+  for (int slot = 0; slot < 2; ++slot) {
+    CUDA_TRY(cudaEventCreateWithFlags(&ready[slot], cudaEventDisableTiming));
+    CUDA_TRY(cudaEventCreateWithFlags(&consumed[slot], cudaEventDisableTiming));
+  }
   CUDA_TRY(cudaMemcpyAsync(d_labels.data(), labels.data(), rows * sizeof(uint32_t),
                            cudaMemcpyHostToDevice, stream));
   CUDA_TRY(cudaStreamSynchronize(stream));
+
+  auto input = [&](int slot) { return slot == 0 ? input0.data() : input1.data(); };
+  auto output = [&](int slot) { return slot == 0 ? output0.data() : output1.data(); };
+  auto d_offsets = [&](int slot) { return slot == 0 ? d_offsets0.data() : d_offsets1.data(); };
+  auto d_counts = [&](int slot) { return slot == 0 ? d_counts0.data() : d_counts1.data(); };
+  auto const num_batches = (rows + batch_rows - 1) / batch_rows;
+  auto enqueue_copy = [&](uint64_t sequence, int slot) {
+    auto batch_id = sequence % num_batches;
+    uint64_t off = batch_id * batch_rows;
+    uint64_t n = std::min(batch_rows, rows - off);
+    CUDA_TRY(cudaMemcpyAsync(input(slot), host + off * dim, n * dim * sizeof(float),
+                             cudaMemcpyHostToDevice, copy_stream));
+    CUDA_TRY(cudaMemcpyAsync(d_offsets(slot), batch_offsets[batch_id].data(),
+                             mesos * sizeof(uint64_t), cudaMemcpyHostToDevice, copy_stream));
+    CUDA_TRY(cudaMemsetAsync(d_counts(slot), 0, mesos * sizeof(unsigned long long), copy_stream));
+    CUDA_TRY(cudaEventRecord(ready[slot], copy_stream));
+  };
+
   auto start = steady_clock::now();
-  for (uint32_t iter = 0; iter < iterations; ++iter) {
-    size_t batch_id = 0;
-    for (uint64_t off = 0; off < rows; off += batch_rows, ++batch_id) {
-      uint64_t n = std::min(batch_rows, rows - off);
-      CUDA_TRY(cudaMemcpyAsync(input.data(), host + off * dim, n * dim * sizeof(float),
-                               cudaMemcpyHostToDevice, stream));
-      CUDA_TRY(cudaMemcpyAsync(d_offsets.data(), batch_offsets[batch_id].data(),
-                               mesos * sizeof(uint64_t), cudaMemcpyHostToDevice, stream));
-      CUDA_TRY(cudaMemsetAsync(d_counts.data(), 0, mesos * sizeof(unsigned long long), stream));
-      bucket<<<unsigned(n), 256, 0, stream>>>(input.data(), output.data(), d_labels.data(), off, n,
-                                              dim, d_offsets.data(), d_counts.data());
-      CUDA_TRY(cudaGetLastError());
+  auto const total_batches = uint64_t(iterations) * num_batches;
+  enqueue_copy(0, 0);
+  for (uint64_t sequence = 0; sequence < total_batches; ++sequence) {
+    int slot = sequence % 2;
+    auto batch_id = sequence % num_batches;
+    uint64_t off = batch_id * batch_rows;
+    uint64_t n = std::min(batch_rows, rows - off);
+    CUDA_TRY(cudaStreamWaitEvent(stream, ready[slot]));
+    bucket<<<unsigned(n), 256, 0, stream>>>(input(slot), output(slot), d_labels.data(), off, n, dim,
+                                            d_offsets(slot), d_counts(slot));
+    CUDA_TRY(cudaGetLastError());
+    CUDA_TRY(cudaEventRecord(consumed[slot], stream));
+    if (sequence + 1 < total_batches) {
+      int next_slot = (sequence + 1) % 2;
+      if (sequence + 1 >= 2) CUDA_TRY(cudaStreamWaitEvent(copy_stream, consumed[next_slot]));
+      enqueue_copy(sequence + 1, next_slot);
     }
   }
   CUDA_TRY(cudaStreamSynchronize(stream));
+  CUDA_TRY(cudaStreamSynchronize(copy_stream));
   double s = elapsed(start);
+  for (int slot = 0; slot < 2; ++slot) {
+    CUDA_TRY(cudaEventDestroy(ready[slot]));
+    CUDA_TRY(cudaEventDestroy(consumed[slot]));
+  }
+  CUDA_TRY(cudaStreamDestroy(copy_stream));
   double gib = double(rows) * dim * sizeof(float) * iterations / double(uint64_t{1} << 30);
   return {s, gib / s};
 }
@@ -191,28 +227,75 @@ result gather(float const* host,
               uint32_t threads,
               cudaStream_t stream)
 {
-  pinned_bytes staging(size_t(batch_rows) * dim * sizeof(float));
-  device_array<float> device_batch(size_t(batch_rows) * dim);
-  auto* packed = static_cast<float*>(staging.data());
-  omp_set_dynamic(0);
-  omp_set_num_threads(threads);
-  auto start = steady_clock::now();
-  for (uint32_t iter = 0; iter < iterations; ++iter) {
-    for (size_t meso = 0; meso + 1 < offsets.size(); ++meso) {
-      for (uint64_t off = offsets[meso]; off < offsets[meso + 1]; off += batch_rows) {
-        uint64_t n = std::min(batch_rows, offsets[meso + 1] - off);
-#pragma omp parallel for schedule(static)
-        for (int64_t local = 0; local < int64_t(n); ++local) {
-          uint64_t source = ids[off + uint64_t(local)];
-          std::memcpy(packed + uint64_t(local) * dim, host + source * dim, size_t(dim) * sizeof(float));
-        }
-        CUDA_TRY(cudaMemcpyAsync(device_batch.data(), packed, n * dim * sizeof(float),
-                                 cudaMemcpyHostToDevice, stream));
-        CUDA_TRY(cudaStreamSynchronize(stream));
-      }
+  pinned_bytes staging0(size_t(batch_rows) * dim * sizeof(float));
+  pinned_bytes staging1(size_t(batch_rows) * dim * sizeof(float));
+  device_array<float> device_batch0(size_t(batch_rows) * dim);
+  device_array<float> device_batch1(size_t(batch_rows) * dim);
+  auto staging = [&](int slot) {
+    return static_cast<float*>(slot == 0 ? staging0.data() : staging1.data());
+  };
+  auto device_batch = [&](int slot) {
+    return slot == 0 ? device_batch0.data() : device_batch1.data();
+  };
+  struct chunk { uint64_t offset, size; };
+  std::vector<chunk> chunks;
+  for (size_t meso = 0; meso + 1 < offsets.size(); ++meso) {
+    for (uint64_t off = offsets[meso]; off < offsets[meso + 1]; off += batch_rows) {
+      chunks.push_back({off, std::min(batch_rows, offsets[meso + 1] - off)});
     }
   }
+
+  omp_set_dynamic(0);
+  omp_set_num_threads(threads);
+  auto pack = [&](chunk current, int slot) {
+    auto* packed = staging(slot);
+#pragma omp parallel for schedule(static)
+    for (int64_t local = 0; local < int64_t(current.size); ++local) {
+      uint64_t source = ids[current.offset + uint64_t(local)];
+      std::memcpy(packed + uint64_t(local) * dim, host + source * dim, size_t(dim) * sizeof(float));
+    }
+  };
+
+  cudaStream_t copy_stream;
+  cudaEvent_t ready[2], consumed[2];
+  CUDA_TRY(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
+  for (int slot = 0; slot < 2; ++slot) {
+    CUDA_TRY(cudaEventCreateWithFlags(&ready[slot], cudaEventDisableTiming));
+    CUDA_TRY(cudaEventCreateWithFlags(&consumed[slot], cudaEventDisableTiming));
+  }
+  auto enqueue_copy = [&](chunk current, int slot) {
+    CUDA_TRY(cudaMemcpyAsync(device_batch(slot), staging(slot), current.size * dim * sizeof(float),
+                             cudaMemcpyHostToDevice, copy_stream));
+    CUDA_TRY(cudaEventRecord(ready[slot], copy_stream));
+  };
+
+  auto start = steady_clock::now();
+  auto const total_chunks = uint64_t(iterations) * chunks.size();
+  pack(chunks[0], 0);
+  enqueue_copy(chunks[0], 0);
+  for (uint64_t sequence = 0; sequence < total_chunks; ++sequence) {
+    int slot = sequence % 2;
+    CUDA_TRY(cudaStreamWaitEvent(stream, ready[slot]));
+    CUDA_TRY(cudaEventRecord(consumed[slot], stream));
+    if (sequence + 1 < total_chunks) {
+      int next_slot = (sequence + 1) % 2;
+      if (sequence + 1 >= 2) CUDA_TRY(cudaEventSynchronize(ready[next_slot]));
+      auto next = chunks[(sequence + 1) % chunks.size()];
+      pack(next, next_slot);
+      if (sequence + 1 >= 2) {
+        CUDA_TRY(cudaStreamWaitEvent(copy_stream, consumed[next_slot]));
+      }
+      enqueue_copy(next, next_slot);
+    }
+  }
+  CUDA_TRY(cudaStreamSynchronize(stream));
+  CUDA_TRY(cudaStreamSynchronize(copy_stream));
   double s = elapsed(start);
+  for (int slot = 0; slot < 2; ++slot) {
+    CUDA_TRY(cudaEventDestroy(ready[slot]));
+    CUDA_TRY(cudaEventDestroy(consumed[slot]));
+  }
+  CUDA_TRY(cudaStreamDestroy(copy_stream));
   double gib = double(rows) * dim * sizeof(float) * iterations / double(uint64_t{1} << 30);
   return {s, gib / s};
 }
