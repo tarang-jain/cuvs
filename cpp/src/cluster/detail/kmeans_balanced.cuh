@@ -341,7 +341,8 @@ void compute_norm(const raft::resources& handle,
                   FinOpT norm_fin_op,
                   std::optional<rmm::device_async_resource_ref> mr = std::nullopt)
 {
-  raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope("compute_norm");
+  raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope(
+    "balanced k-means: norm preprocessing batch");
   auto stream = raft::resource::get_cuda_stream(handle);
   rmm::device_uvector<MathT> mapped_dataset(
     0, stream, mr.value_or(raft::resource::get_workspace_resource_ref(handle)));
@@ -405,7 +406,7 @@ void predict(const raft::resources& handle,
 {
   auto stream = raft::resource::get_cuda_stream(handle);
   raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope(
-    "predict(%zu, %u)", static_cast<size_t>(n_rows), n_clusters);
+    "balanced k-means: predict (%zu rows, %u centers)", static_cast<size_t>(n_rows), n_clusters);
   auto mem_res = mr.value_or(raft::resource::get_workspace_resource_ref(handle));
   auto [max_minibatch_size, _mem_per_row] = calc_minibatch_size<MathT>(
     handle, n_clusters, n_rows, dim, params.metric, std::is_same_v<T, MathT>);
@@ -644,7 +645,7 @@ auto adjust_centers(const raft::resources& handle,
                     rmm::device_async_resource_ref device_memory) -> bool
 {
   raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope(
-    "adjust_centers(%zu, %u)", static_cast<size_t>(n_rows), n_clusters);
+    "balanced k-means: adjust centers (%zu rows, %u centers)", static_cast<size_t>(n_rows), n_clusters);
   if (n_clusters == 0) { return false; }
   auto stream = raft::resource::get_cuda_stream(handle);
   constexpr static std::array kPrimes{29,   71,   113,  173,  229,  281,  349,  409,  463,  541,
@@ -814,6 +815,8 @@ void balancing_em_iters(const raft::resources& handle,
 
   uint32_t balancing_counter = balancing_pullback;
   for (uint32_t iter = 0; iter < n_iters; iter++) {
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> iteration_scope(
+      "balanced k-means: EM iteration %u", iter);
     // Balancing step - move the centers around to equalize cluster sizes
     // (but not on the first iteration)
     if (iter > 0 && adjust_centers(handle,
@@ -841,6 +844,8 @@ void balancing_em_iters(const raft::resources& handle,
       case cuvs::distance::DistanceType::InnerProduct:
       case cuvs::distance::DistanceType::CosineExpanded:
       case cuvs::distance::DistanceType::CorrelationExpanded: {
+        raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> normalize_scope(
+          "balanced k-means: center normalization");
         auto clusters_in_view = raft::make_device_matrix_view<const MathT, IdxT, raft::row_major>(
           cluster_centers, n_clusters, dim);
         auto clusters_out_view = raft::make_device_matrix_view<MathT, IdxT, raft::row_major>(
@@ -852,29 +857,37 @@ void balancing_em_iters(const raft::resources& handle,
       default: break;
     }
     // E: Expectation step - predict labels
-    predict(handle,
-            params,
-            cluster_centers,
-            n_clusters,
-            dim,
-            dataset,
-            n_rows,
-            cluster_labels,
-            mapping_op,
-            device_memory,
-            dataset_norm);
+    {
+      raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> expectation_scope(
+        "balanced k-means: expectation/predict");
+      predict(handle,
+              params,
+              cluster_centers,
+              n_clusters,
+              dim,
+              dataset,
+              n_rows,
+              cluster_labels,
+              mapping_op,
+              device_memory,
+              dataset_norm);
+    }
     // M: Maximization step - calculate optimal cluster centers
-    calc_centers_and_sizes(handle,
-                           cluster_centers,
-                           cluster_sizes,
-                           n_clusters,
-                           dim,
-                           dataset,
-                           n_rows,
-                           cluster_labels,
-                           true,
-                           mapping_op,
-                           device_memory);
+    {
+      raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> maximization_scope(
+        "balanced k-means: maximization/update centers");
+      calc_centers_and_sizes(handle,
+                             cluster_centers,
+                             cluster_sizes,
+                             n_clusters,
+                             dim,
+                             dataset,
+                             n_rows,
+                             cluster_labels,
+                             true,
+                             mapping_op,
+                             device_memory);
+    }
   }
 }
 
@@ -899,25 +912,29 @@ void build_clusters(const raft::resources& handle,
                     const MathT* dataset_norm = nullptr)
 {
   auto stream = raft::resource::get_cuda_stream(handle);
-  // "randomly" initialize labels
-  auto labels_view = raft::make_device_vector_view<LabelT, IdxT>(cluster_labels, n_rows);
-  raft::linalg::map_offset(
-    handle,
-    labels_view,
-    raft::compose_op(raft::cast_op<LabelT>(), raft::mod_const_op<IdxT>(n_clusters)));
+  {
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> initialization_scope(
+      "balanced k-means: label/center initialization");
+    // "randomly" initialize labels
+    auto labels_view = raft::make_device_vector_view<LabelT, IdxT>(cluster_labels, n_rows);
+    raft::linalg::map_offset(
+      handle,
+      labels_view,
+      raft::compose_op(raft::cast_op<LabelT>(), raft::mod_const_op<IdxT>(n_clusters)));
 
-  // update centers to match the initialized labels.
-  calc_centers_and_sizes(handle,
-                         cluster_centers,
-                         cluster_sizes,
-                         n_clusters,
-                         dim,
-                         dataset,
-                         n_rows,
-                         cluster_labels,
-                         true,
-                         mapping_op,
-                         device_memory);
+    // update centers to match the initialized labels.
+    calc_centers_and_sizes(handle,
+                           cluster_centers,
+                           cluster_sizes,
+                           n_clusters,
+                           dim,
+                           dataset,
+                           n_rows,
+                           cluster_labels,
+                           true,
+                           mapping_op,
+                           device_memory);
+  }
 
   // run EM
   balancing_em_iters(handle,
@@ -1041,6 +1058,8 @@ auto build_fine_clusters(const raft::resources& handle,
                          rmm::device_async_resource_ref device_memory) -> IdxT
 {
   auto stream = raft::resource::get_cuda_stream(handle);
+  raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fine_training_scope(
+    "balanced k-means: fine-cluster training");
   rmm::device_uvector<IdxT> mc_trainset_ids_buf(mesocluster_size_max, stream, managed_memory);
   // for small cluster counts the maximum mesocluster size is proportional to the number of rows, so
   // we use large workspace
@@ -1064,6 +1083,8 @@ auto build_fine_clusters(const raft::resources& handle,
   IdxT n_clusters_done = 0;
   for (IdxT i = 0; i < n_mesoclusters; i++) {
     IdxT k = 0;
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> mesocluster_scope(
+      "balanced k-means: fine-cluster training mesocluster %u", static_cast<unsigned>(i));
     for (IdxT j = 0; j < n_rows && k < mesocluster_size_max; j++) {
       if (labels_mptr[j] == LabelT(i)) { mc_trainset_ids[k++] = j; }
     }
@@ -1172,6 +1193,8 @@ void build_hierarchical(const raft::resources& handle,
        params.metric == cuvs::distance::DistanceType::L2SqrtExpanded ||
        params.metric == cuvs::distance::DistanceType::CosineExpanded)) {
     dataset_norm_buf.resize(n_rows, stream);
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> norm_scope(
+      "balanced k-means: norm preprocessing");
     for (IdxT offset = 0; offset < n_rows; offset += max_minibatch_size) {
       IdxT minibatch_size = std::min<IdxT>(max_minibatch_size, n_rows - offset);
       if (params.metric == cuvs::distance::DistanceType::CosineExpanded)
@@ -1206,6 +1229,8 @@ void build_hierarchical(const raft::resources& handle,
   rmm::device_uvector<CounterT> mesocluster_sizes_buf(n_mesoclusters, stream, managed_memory);
   {
     rmm::device_uvector<MathT> mesocluster_centers_buf(n_mesoclusters * dim, stream, device_memory);
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> mesocluster_training_scope(
+      "balanced k-means: mesocluster training");
     build_clusters(handle,
                    params,
                    dim,
@@ -1227,7 +1252,11 @@ void build_hierarchical(const raft::resources& handle,
 
   // build fine clusters
   auto [mesocluster_size_max, fine_clusters_nums_max, fine_clusters_nums, fine_clusters_csum] =
-    arrange_fine_clusters(n_clusters, n_mesoclusters, n_rows, mesocluster_sizes);
+    [&] {
+      raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> allocation_scope(
+        "balanced k-means: fine-cluster allocation");
+      return arrange_fine_clusters(n_clusters, n_mesoclusters, n_rows, mesocluster_sizes);
+    }();
 
   const IdxT mesocluster_size_max_balanced = raft::div_rounding_up_safe<size_t>(
     2lu * size_t(n_rows), std::max<size_t>(size_t(n_mesoclusters), 1lu));
@@ -1281,22 +1310,26 @@ void build_hierarchical(const raft::resources& handle,
     static_cast<MathT>(params.balance_upper_tolerance / relaxing_factor);
   RAFT_LOG_DEBUG(
     "n_iters: %u, tolerance: %f, %f\n", n_iters, balance_lower_tolerance, balance_upper_tolerance);
-  balancing_em_iters(handle,
-                     params,
-                     n_iters,
-                     dim,
-                     dataset,
-                     dataset_norm,
-                     n_rows,
-                     n_clusters,
-                     cluster_centers,
-                     labels.data(),
-                     cluster_sizes.data(),
-                     5,
-                     balance_lower_tolerance,
-                     balance_upper_tolerance,
-                     mapping_op,
-                     device_memory);
+  {
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> refinement_scope(
+      "balanced k-means: global fine-cluster refinement");
+    balancing_em_iters(handle,
+                       params,
+                       n_iters,
+                       dim,
+                       dataset,
+                       dataset_norm,
+                       n_rows,
+                       n_clusters,
+                       cluster_centers,
+                       labels.data(),
+                       cluster_sizes.data(),
+                       5,
+                       balance_lower_tolerance,
+                       balance_upper_tolerance,
+                       mapping_op,
+                       device_memory);
+  }
 
   // Compute inertia if requested (only supported when T == MathT)
   if (inertia != nullptr) {
