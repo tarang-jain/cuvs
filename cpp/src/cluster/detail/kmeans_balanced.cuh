@@ -818,7 +818,7 @@ template <typename T,
           typename LabelT,
           typename CounterT,
           typename MappingOpT>
-struct device_balancing_em_state {
+struct in_core_balancing_em_state {
   auto adjust_centers() -> bool
   {
     return cuvs::cluster::kmeans::detail::adjust_centers(handle,
@@ -878,6 +878,436 @@ struct device_balancing_em_state {
   MappingOpT mapping_op;
   rmm::device_async_resource_ref device_memory;
 };
+
+template <typename T, typename MathT, typename IdxT, typename LabelT, typename CounterT>
+struct balanced_em_workspace {
+  balanced_em_workspace(const raft::resources& handle,
+                        const cuvs::cluster::kmeans::balanced_params& params,
+                        IdxT rows_per_batch,
+                        IdxT n_clusters,
+                        IdxT dim,
+                        rmm::device_async_resource_ref mr)
+    : labels(rows_per_batch, raft::resource::get_cuda_stream(handle), mr),
+      nearest(rows_per_batch, raft::resource::get_cuda_stream(handle), mr),
+      norms(rows_per_batch, raft::resource::get_cuda_stream(handle), mr),
+      distances(params.metric == cuvs::distance::DistanceType::InnerProduct
+                  ? rows_per_batch * n_clusters
+                  : 0,
+                raft::resource::get_cuda_stream(handle),
+                mr),
+      l2_norm_or_distance(0, raft::resource::get_cuda_stream(handle), mr),
+      prediction_workspace(0, raft::resource::get_cuda_stream(handle), mr),
+      next_centers(n_clusters * dim, raft::resource::get_cuda_stream(handle), mr),
+      sums(n_clusters * dim, raft::resource::get_cuda_stream(handle), mr),
+      counts(n_clusters, raft::resource::get_cuda_stream(handle), mr),
+      count_weights(rows_per_batch, raft::resource::get_cuda_stream(handle), mr),
+      pinned_sizes(raft::make_pinned_vector<CounterT, IdxT>(handle, n_clusters))
+  {
+  }
+
+  rmm::device_uvector<LabelT> labels;
+  rmm::device_uvector<raft::KeyValuePair<IdxT, MathT>> nearest;
+  rmm::device_uvector<MathT> norms;
+  rmm::device_uvector<MathT> distances;
+  rmm::device_uvector<MathT> l2_norm_or_distance;
+  rmm::device_uvector<char> prediction_workspace;
+  rmm::device_uvector<MathT> next_centers;
+  rmm::device_uvector<MathT> sums;
+  rmm::device_uvector<CounterT> counts;
+  rmm::device_uvector<CounterT> count_weights;
+  raft::pinned_vector<CounterT, IdxT> pinned_sizes;
+};
+
+template <typename MathT, typename IdxT, typename LabelT, typename T, typename CounterT>
+void predict_batch(const raft::resources& handle,
+                   const cuvs::cluster::kmeans::balanced_params& params,
+                   const MathT* centers,
+                   IdxT n_clusters,
+                   IdxT dim,
+                   const MathT* data,
+                   IdxT n_rows,
+                   const MathT* norms,
+                   LabelT* labels,
+                   balanced_em_workspace<T, MathT, IdxT, LabelT, CounterT>& workspace)
+{
+  switch (params.metric) {
+    case cuvs::distance::DistanceType::L2Expanded:
+    case cuvs::distance::DistanceType::L2SqrtExpanded:
+    case cuvs::distance::DistanceType::CosineExpanded: {
+      auto data_view = raft::make_device_matrix_view<const MathT, IdxT>(data, n_rows, dim);
+      auto centers_view =
+        raft::make_device_matrix_view<const MathT, IdxT>(centers, n_clusters, dim);
+      auto norms_view   = raft::make_device_vector_view<const MathT, IdxT>(norms, n_rows);
+      auto nearest_view = raft::make_device_vector_view<raft::KeyValuePair<IdxT, MathT>, IdxT>(
+        workspace.nearest.data(), n_rows);
+      minClusterAndDistanceCompute<MathT, IdxT>(handle,
+                                                data_view,
+                                                centers_view,
+                                                nearest_view,
+                                                norms_view,
+                                                workspace.l2_norm_or_distance,
+                                                params.metric,
+                                                0,
+                                                0,
+                                                workspace.prediction_workspace);
+      raft::linalg::map(handle,
+                        raft::make_const_mdspan(nearest_view),
+                        raft::make_device_vector_view<LabelT, IdxT>(labels, n_rows),
+                        raft::compose_op<raft::cast_op<LabelT>, raft::key_op>());
+      break;
+    }
+    case cuvs::distance::DistanceType::InnerProduct: {
+      auto stream = raft::resource::get_cuda_stream(handle);
+      MathT alpha = -1.0;
+      MathT beta  = 0.0;
+      raft::linalg::gemm(handle,
+                         true,
+                         false,
+                         n_clusters,
+                         n_rows,
+                         dim,
+                         &alpha,
+                         centers,
+                         dim,
+                         data,
+                         dim,
+                         &beta,
+                         workspace.distances.data(),
+                         n_clusters,
+                         stream.get());
+      auto distances_view = raft::make_device_matrix_view<const MathT, IdxT, raft::row_major>(
+        workspace.distances.data(), n_rows, n_clusters);
+      raft::matrix::argmin(
+        handle, distances_view, raft::make_device_vector_view<LabelT, IdxT>(labels, n_rows));
+      break;
+    }
+    default: {
+      RAFT_FAIL("The chosen distance metric is not supported (%d)", int(params.metric));
+    }
+  }
+}
+
+template <bool DataOnDevice,
+          typename T,
+          typename MathT,
+          typename IdxT,
+          typename LabelT,
+          typename CounterT>
+void process_batch(const raft::resources& handle,
+                   const cuvs::cluster::kmeans::balanced_params& params,
+                   const T* input,
+                   IdxT n_rows,
+                   IdxT offset,
+                   IdxT dim,
+                   IdxT n_clusters,
+                   const MathT* dataset_norm,
+                   MathT* centers,
+                   LabelT* labels,
+                   bool predict_labels,
+                   rmm::device_async_resource_ref device_memory,
+                   balanced_em_workspace<T, MathT, IdxT, LabelT, CounterT>& workspace)
+{
+  static_assert(std::is_same_v<T, float> && std::is_same_v<MathT, float>,
+                "Batched balanced k-means currently supports float input only");
+  auto stream       = raft::resource::get_cuda_stream(handle);
+  const MathT* data = input;
+
+  const bool needs_norm = params.metric == cuvs::distance::DistanceType::L2Expanded ||
+                          params.metric == cuvs::distance::DistanceType::L2SqrtExpanded ||
+                          params.metric == cuvs::distance::DistanceType::CosineExpanded;
+  const MathT* batch_norms = nullptr;
+  if (needs_norm) {
+    if (dataset_norm != nullptr) {
+      if constexpr (DataOnDevice) {
+        batch_norms = dataset_norm + offset;
+      } else {
+        raft::update_device(workspace.norms.data(), dataset_norm + offset, n_rows, stream);
+        batch_norms = workspace.norms.data();
+      }
+    } else {
+      if (params.metric == cuvs::distance::DistanceType::CosineExpanded) {
+        compute_norm(handle,
+                     workspace.norms.data(),
+                     data,
+                     dim,
+                     n_rows,
+                     raft::identity_op{},
+                     raft::sqrt_op{},
+                     device_memory);
+      } else {
+        compute_norm(handle,
+                     workspace.norms.data(),
+                     data,
+                     dim,
+                     n_rows,
+                     raft::identity_op{},
+                     raft::identity_op{},
+                     device_memory);
+      }
+      batch_norms = workspace.norms.data();
+    }
+  }
+
+  LabelT* batch_labels = nullptr;
+  if constexpr (DataOnDevice) {
+    batch_labels = labels + offset;
+  } else {
+    batch_labels = workspace.labels.data();
+  }
+
+  if (predict_labels) {
+    predict_batch(
+      handle, params, centers, n_clusters, dim, data, n_rows, batch_norms, batch_labels, workspace);
+  } else if constexpr (!DataOnDevice) {
+    raft::update_device(batch_labels, labels + offset, n_rows, stream);
+  }
+
+  raft::linalg::reduce_rows_by_key(data,
+                                   dim,
+                                   batch_labels,
+                                   static_cast<char*>(nullptr),
+                                   n_rows,
+                                   dim,
+                                   n_clusters,
+                                   workspace.sums.data(),
+                                   stream.get(),
+                                   false);
+  raft::linalg::reduce_cols_by_key(
+    handle,
+    raft::make_device_matrix_view<const CounterT, IdxT>(
+      workspace.count_weights.data(), IdxT{1}, n_rows),
+    raft::make_device_vector_view<const LabelT, IdxT>(batch_labels, n_rows),
+    raft::make_device_matrix_view<CounterT, IdxT>(workspace.counts.data(), IdxT{1}, n_clusters),
+    n_clusters,
+    false);
+
+  if constexpr (!DataOnDevice) { raft::update_host(labels + offset, batch_labels, n_rows, stream); }
+}
+
+template <typename MathT, typename IdxT, typename CounterT>
+struct normalize_center_sums {
+  const CounterT* counts;
+  const MathT* centers;
+  IdxT dim;
+
+  template <typename OffsetT>
+  __device__ auto operator()(OffsetT i, MathT sum) const -> MathT
+  {
+    auto offset = static_cast<IdxT>(i);
+    auto count  = counts[offset / dim];
+    return count == 0 ? centers[offset] : sum / static_cast<MathT>(count);
+  }
+};
+
+template <typename T,
+          typename MathT,
+          typename IdxT,
+          typename LabelT,
+          typename CounterT,
+          typename InputViewT,
+          typename MappingOpT>
+struct batched_balancing_em_state {
+  static constexpr bool data_on_device = raft::is_device_mdspan_v<InputViewT>;
+  using sizes_output_type   = std::conditional_t<data_on_device, CounterT*, std::vector<CounterT>*>;
+  using batch_iterator_type = cuvs::spatial::knn::detail::utils::batch_load_iterator<InputViewT>;
+
+  batched_balancing_em_state(const raft::resources& handle,
+                             const cuvs::cluster::kmeans::balanced_params& params,
+                             InputViewT X,
+                             const MathT* dataset_norm,
+                             IdxT n_clusters,
+                             MathT* centers,
+                             LabelT* labels,
+                             sizes_output_type sizes,
+                             IdxT rows_per_batch,
+                             MathT lower_tolerance,
+                             MathT upper_tolerance,
+                             MappingOpT mapping_op,
+                             rmm::device_async_resource_ref device_memory)
+    : handle(handle),
+      params(params),
+      X(X),
+      dataset_norm(dataset_norm),
+      n_rows(X.extent(0)),
+      dim(X.extent(1)),
+      n_clusters(n_clusters),
+      center_elems(n_clusters * dim),
+      centers(centers),
+      labels(labels),
+      sizes(sizes),
+      rows_per_batch(rows_per_batch),
+      lower_tolerance(lower_tolerance),
+      upper_tolerance(upper_tolerance),
+      mapping_op(mapping_op),
+      stream(raft::resource::get_cuda_stream(handle)),
+      device_memory(device_memory),
+      workspace(handle, params, rows_per_batch, n_clusters, dim, device_memory),
+      copy_stream(rmm::cuda_stream::flags::non_blocking),
+      batches(handle,
+              X,
+              static_cast<size_t>(rows_per_batch),
+              copy_stream.view(),
+              device_memory,
+              !data_on_device)
+  {
+    raft::matrix::fill(
+      handle,
+      raft::make_device_vector_view<CounterT, IdxT>(workspace.count_weights.data(), rows_per_batch),
+      CounterT{1});
+  }
+
+  void initialize_centers()
+  {
+    if constexpr (data_on_device) {
+      raft::linalg::map_offset(
+        handle,
+        raft::make_device_vector_view<LabelT, IdxT>(labels, n_rows),
+        raft::compose_op(raft::cast_op<LabelT>(), raft::mod_const_op<IdxT>(n_clusters)));
+    } else {
+#pragma omp parallel for schedule(static)
+      for (IdxT row = 0; row < n_rows; ++row) {
+        labels[row] = static_cast<LabelT>(row % n_clusters);
+      }
+    }
+
+    raft::matrix::fill(
+      handle, raft::make_device_vector_view<MathT, IdxT>(centers, center_elems), MathT{0});
+    process_batches(false);
+    raft::copy(centers, workspace.next_centers.data(), center_elems, stream);
+  }
+
+  void process_batches()
+  {
+    process_batches(true);
+    raft::copy(centers, workspace.next_centers.data(), center_elems, stream);
+  }
+
+ protected:
+  void process_batches(bool predict_labels)
+  {
+    raft::matrix::fill(
+      handle,
+      raft::make_device_vector_view<MathT, IdxT>(workspace.sums.data(), center_elems),
+      MathT{0});
+    raft::matrix::fill(
+      handle,
+      raft::make_device_vector_view<CounterT, IdxT>(workspace.counts.data(), n_clusters),
+      CounterT{0});
+
+    batches.reset();
+    batches.prefetch_next_batch();
+    for (auto const& batch : batches) {
+      process_batch<data_on_device>(handle,
+                                    params,
+                                    batch.data(),
+                                    static_cast<IdxT>(batch.size()),
+                                    static_cast<IdxT>(batch.offset()),
+                                    dim,
+                                    n_clusters,
+                                    dataset_norm,
+                                    centers,
+                                    labels,
+                                    predict_labels,
+                                    device_memory,
+                                    workspace);
+      batches.prefetch_next_batch();
+    }
+
+    auto next_centers_view =
+      raft::make_device_vector_view<MathT, IdxT>(workspace.next_centers.data(), center_elems);
+    raft::linalg::map_offset(
+      handle,
+      next_centers_view,
+      normalize_center_sums<MathT, IdxT, CounterT>{workspace.counts.data(), centers, dim},
+      raft::make_device_vector_view<const MathT, IdxT>(workspace.sums.data(), center_elems));
+
+    if constexpr (data_on_device) {
+      raft::copy(sizes, workspace.counts.data(), n_clusters, stream);
+    } else {
+      raft::update_host(
+        workspace.pinned_sizes.data_handle(), workspace.counts.data(), n_clusters, stream);
+      raft::resource::sync_stream(handle, stream);
+      raft::resource::sync_stream(handle, copy_stream.view());
+      std::copy_n(workspace.pinned_sizes.data_handle(), n_clusters, sizes->begin());
+    }
+  }
+
+  const raft::resources& handle;
+  const cuvs::cluster::kmeans::balanced_params& params;
+  InputViewT X;
+  const MathT* dataset_norm;
+  IdxT n_rows;
+  IdxT dim;
+  IdxT n_clusters;
+  IdxT center_elems;
+  MathT* centers;
+  LabelT* labels;
+  sizes_output_type sizes;
+  IdxT rows_per_batch;
+  MathT lower_tolerance;
+  MathT upper_tolerance;
+  MappingOpT mapping_op;
+  rmm::cuda_stream_view stream;
+  rmm::device_async_resource_ref device_memory;
+  balanced_em_workspace<T, MathT, IdxT, LabelT, CounterT> workspace;
+  rmm::cuda_stream copy_stream;
+  batch_iterator_type batches;
+};
+
+template <typename T,
+          typename MathT,
+          typename IdxT,
+          typename LabelT,
+          typename CounterT,
+          typename MappingOpT>
+struct device_balancing_em_state
+  : batched_balancing_em_state<T,
+                               MathT,
+                               IdxT,
+                               LabelT,
+                               CounterT,
+                               raft::device_matrix_view<const T, IdxT>,
+                               MappingOpT> {
+  using base_type = batched_balancing_em_state<T,
+                                               MathT,
+                                               IdxT,
+                                               LabelT,
+                                               CounterT,
+                                               raft::device_matrix_view<const T, IdxT>,
+                                               MappingOpT>;
+  using base_type::base_type;
+
+  auto adjust_centers() -> bool
+  {
+    return cuvs::cluster::kmeans::detail::adjust_centers(
+      this->handle,
+      this->centers,
+      this->n_clusters,
+      this->dim,
+      this->X.data_handle(),
+      this->n_rows,
+      this->labels,
+      this->workspace.counts.data(),
+      this->lower_tolerance,
+      this->upper_tolerance,
+      static_cast<MathT>(this->params.centroid_offset),
+      this->params.donor_selection,
+      this->mapping_op,
+      this->device_memory);
+  }
+};
+
+template <typename T, typename MathT, typename IdxT>
+auto device_batch_rows(const raft::resources& handle,
+                       const cuvs::cluster::kmeans::balanced_params& params,
+                       IdxT n_rows,
+                       IdxT n_clusters,
+                       IdxT dim) -> IdxT
+{
+  auto [rows, _] = calc_minibatch_size<MathT>(
+    handle, n_clusters, n_rows, dim, params.metric, std::is_same_v<T, MathT>);
+  return rows;
+}
 
 /**
  * @brief Expectation-maximization-balancing combined in an iterative process.
@@ -942,32 +1372,62 @@ void balancing_em_iters(const raft::resources& handle,
                         MappingOpT mapping_op,
                         rmm::device_async_resource_ref device_memory)
 {
-  device_balancing_em_state<T, MathT, IdxT, LabelT, CounterT, MappingOpT> state{
-    handle,
-    params,
-    dim,
-    dataset,
-    dataset_norm,
-    n_rows,
-    n_clusters,
-    cluster_centers,
-    cluster_labels,
-    cluster_sizes,
-    balance_lower_tolerance,
-    balance_upper_tolerance,
-    mapping_op,
-    device_memory};
+  if constexpr (std::is_same_v<T, float> && std::is_same_v<MathT, float>) {
+    auto X              = raft::make_device_matrix_view<const T, IdxT>(dataset, n_rows, dim);
+    auto rows_per_batch = device_batch_rows<T, MathT>(handle, params, n_rows, n_clusters, dim);
+    device_balancing_em_state<T, MathT, IdxT, LabelT, CounterT, MappingOpT> state(
+      handle,
+      params,
+      X,
+      dataset_norm,
+      n_clusters,
+      cluster_centers,
+      cluster_labels,
+      cluster_sizes,
+      rows_per_batch,
+      balance_lower_tolerance,
+      balance_upper_tolerance,
+      mapping_op,
+      device_memory);
 
-  balancing_em_iters(handle,
-                     params,
-                     n_iters,
-                     n_clusters,
-                     dim,
-                     cluster_centers,
-                     balancing_pullback,
-                     balance_lower_tolerance,
-                     balance_upper_tolerance,
-                     state);
+    balancing_em_iters(handle,
+                       params,
+                       n_iters,
+                       n_clusters,
+                       dim,
+                       cluster_centers,
+                       balancing_pullback,
+                       balance_lower_tolerance,
+                       balance_upper_tolerance,
+                       state);
+  } else {
+    in_core_balancing_em_state<T, MathT, IdxT, LabelT, CounterT, MappingOpT> state{
+      handle,
+      params,
+      dim,
+      dataset,
+      dataset_norm,
+      n_rows,
+      n_clusters,
+      cluster_centers,
+      cluster_labels,
+      cluster_sizes,
+      balance_lower_tolerance,
+      balance_upper_tolerance,
+      mapping_op,
+      device_memory};
+
+    balancing_em_iters(handle,
+                       params,
+                       n_iters,
+                       n_clusters,
+                       dim,
+                       cluster_centers,
+                       balancing_pullback,
+                       balance_lower_tolerance,
+                       balance_upper_tolerance,
+                       state);
+  }
 }
 
 /** Randomly initialize cluster centers and then call `balancing_em_iters`. */
@@ -990,44 +1450,71 @@ void build_clusters(const raft::resources& handle,
                     rmm::device_async_resource_ref device_memory,
                     const MathT* dataset_norm = nullptr)
 {
-  auto stream = raft::resource::get_cuda_stream(handle);
-  // "randomly" initialize labels
-  auto labels_view = raft::make_device_vector_view<LabelT, IdxT>(cluster_labels, n_rows);
-  raft::linalg::map_offset(
-    handle,
-    labels_view,
-    raft::compose_op(raft::cast_op<LabelT>(), raft::mod_const_op<IdxT>(n_clusters)));
+  if constexpr (std::is_same_v<T, float> && std::is_same_v<MathT, float>) {
+    auto X              = raft::make_device_matrix_view<const T, IdxT>(dataset, n_rows, dim);
+    auto rows_per_batch = device_batch_rows<T, MathT>(handle, params, n_rows, n_clusters, dim);
+    device_balancing_em_state<T, MathT, IdxT, LabelT, CounterT, MappingOpT> state(
+      handle,
+      params,
+      X,
+      dataset_norm,
+      n_clusters,
+      cluster_centers,
+      cluster_labels,
+      cluster_sizes,
+      rows_per_batch,
+      static_cast<MathT>(params.balance_lower_tolerance),
+      static_cast<MathT>(params.balance_upper_tolerance),
+      mapping_op,
+      device_memory);
+    state.initialize_centers();
 
-  // update centers to match the initialized labels.
-  calc_centers_and_sizes(handle,
-                         cluster_centers,
-                         cluster_sizes,
-                         n_clusters,
-                         dim,
-                         dataset,
-                         n_rows,
-                         cluster_labels,
-                         true,
-                         mapping_op,
-                         device_memory);
+    balancing_em_iters(handle,
+                       params,
+                       params.n_iters,
+                       n_clusters,
+                       dim,
+                       cluster_centers,
+                       2,
+                       static_cast<MathT>(params.balance_lower_tolerance),
+                       static_cast<MathT>(params.balance_upper_tolerance),
+                       state);
+  } else {
+    auto labels_view = raft::make_device_vector_view<LabelT, IdxT>(cluster_labels, n_rows);
+    raft::linalg::map_offset(
+      handle,
+      labels_view,
+      raft::compose_op(raft::cast_op<LabelT>(), raft::mod_const_op<IdxT>(n_clusters)));
 
-  // run EM
-  balancing_em_iters(handle,
-                     params,
-                     params.n_iters,
-                     dim,
-                     dataset,
-                     dataset_norm,
-                     n_rows,
-                     n_clusters,
-                     cluster_centers,
-                     cluster_labels,
-                     cluster_sizes,
-                     2,
-                     static_cast<MathT>(params.balance_lower_tolerance),
-                     static_cast<MathT>(params.balance_upper_tolerance),
-                     mapping_op,
-                     device_memory);
+    calc_centers_and_sizes(handle,
+                           cluster_centers,
+                           cluster_sizes,
+                           n_clusters,
+                           dim,
+                           dataset,
+                           n_rows,
+                           cluster_labels,
+                           true,
+                           mapping_op,
+                           device_memory);
+
+    balancing_em_iters(handle,
+                       params,
+                       params.n_iters,
+                       dim,
+                       dataset,
+                       dataset_norm,
+                       n_rows,
+                       n_clusters,
+                       cluster_centers,
+                       cluster_labels,
+                       cluster_sizes,
+                       2,
+                       static_cast<MathT>(params.balance_lower_tolerance),
+                       static_cast<MathT>(params.balance_upper_tolerance),
+                       mapping_op,
+                       device_memory);
+  }
 }
 
 /** Calculate how many fine clusters should belong to each mesocluster. */
@@ -1218,7 +1705,6 @@ namespace cuvs::cluster::kmeans::detail {
 using host_index_type   = int64_t;
 using host_label_type   = uint32_t;
 using host_counter_type = unsigned long long;
-using host_kvp_type     = raft::KeyValuePair<host_index_type, float>;
 
 // RAFT does not expose an event abstraction. These events are the narrow CUDA-runtime exception
 // needed to hand double-buffer slots between independent nonblocking streams without synchronizing
@@ -1239,57 +1725,6 @@ class host_cuda_event {
  private:
   cudaEvent_t event_{};
 };
-
-struct host_prediction_scratch {
-  host_prediction_scratch(const raft::resources& handle, host_index_type batch_rows)
-    : labels(batch_rows,
-             raft::resource::get_cuda_stream(handle),
-             raft::resource::get_workspace_resource_ref(handle)),
-      nearest(batch_rows,
-              raft::resource::get_cuda_stream(handle),
-              raft::resource::get_workspace_resource_ref(handle)),
-      norms(batch_rows,
-            raft::resource::get_cuda_stream(handle),
-            raft::resource::get_workspace_resource_ref(handle)),
-      l2_norm_or_distance(0,
-                          raft::resource::get_cuda_stream(handle),
-                          raft::resource::get_workspace_resource_ref(handle)),
-      workspace(0,
-                raft::resource::get_cuda_stream(handle),
-                raft::resource::get_workspace_resource_ref(handle))
-  {
-  }
-
-  rmm::device_uvector<host_label_type> labels;
-  rmm::device_uvector<host_kvp_type> nearest;
-  rmm::device_uvector<float> norms;
-  rmm::device_uvector<float> l2_norm_or_distance;
-  rmm::device_uvector<char> workspace;
-};
-
-inline void predict_batch(const raft::resources& handle,
-                          const cuvs::cluster::kmeans::balanced_params& params,
-                          const float* centers,
-                          host_index_type n_clusters,
-                          host_index_type dim,
-                          const float* data,
-                          host_index_type n_rows,
-                          const float* norms,
-                          host_prediction_scratch& scratch)
-{
-  auto X = raft::make_device_matrix_view<const float, host_index_type>(data, n_rows, dim);
-  auto C = raft::make_device_matrix_view<const float, host_index_type>(centers, n_clusters, dim);
-  auto N = raft::make_device_vector_view<const float, host_index_type>(norms, n_rows);
-  auto K =
-    raft::make_device_vector_view<host_kvp_type, host_index_type>(scratch.nearest.data(), n_rows);
-  cuvs::cluster::kmeans::detail::minClusterAndDistanceCompute<float, host_index_type>(
-    handle, X, C, K, N, scratch.l2_norm_or_distance, params.metric, 0, 0, scratch.workspace);
-  raft::linalg::map(
-    handle,
-    raft::make_const_mdspan(K),
-    raft::make_device_vector_view<host_label_type, host_index_type>(scratch.labels.data(), n_rows),
-    raft::compose_op<raft::cast_op<host_label_type>, raft::key_op>());
-}
 
 inline auto batch_rows(const cuvs::cluster::kmeans::balanced_params& params, host_index_type n_rows)
   -> host_index_type
@@ -1464,59 +1899,16 @@ inline auto adjust_centers(const raft::resources& handle,
   return true;
 }
 
-inline void process_batch(const raft::resources& handle,
-                          const cuvs::cluster::kmeans::balanced_params& params,
-                          const float* centers,
-                          host_index_type n_clusters,
-                          host_index_type dim,
-                          const float* data,
-                          host_index_type n_rows,
-                          host_index_type offset,
-                          const float* host_norms,
-                          host_label_type* host_labels,
-                          bool predict,
-                          host_prediction_scratch& prediction,
-                          const host_counter_type* count_weights,
-                          float* sums,
-                          host_counter_type* counts)
-{
-  auto stream = raft::resource::get_cuda_stream(handle);
-  if (predict) {
-    raft::update_device(prediction.norms.data(), host_norms + offset, n_rows, stream);
-    predict_batch(
-      handle, params, centers, n_clusters, dim, data, n_rows, prediction.norms.data(), prediction);
-  } else {
-    raft::update_device(prediction.labels.data(), host_labels + offset, n_rows, stream);
-  }
+using host_matrix_view_type        = raft::host_matrix_view<const float, host_index_type>;
+using host_balancing_em_state_base = batched_balancing_em_state<float,
+                                                                float,
+                                                                host_index_type,
+                                                                host_label_type,
+                                                                host_counter_type,
+                                                                host_matrix_view_type,
+                                                                raft::identity_op>;
 
-  raft::linalg::reduce_rows_by_key(data,
-                                   dim,
-                                   prediction.labels.data(),
-                                   static_cast<char*>(nullptr),
-                                   n_rows,
-                                   dim,
-                                   n_clusters,
-                                   sums,
-                                   stream.get(),
-                                   false);
-  raft::linalg::reduce_cols_by_key(
-    handle,
-    raft::make_device_matrix_view<const host_counter_type, host_index_type>(
-      count_weights, host_index_type{1}, n_rows),
-    raft::make_device_vector_view<const host_label_type, host_index_type>(prediction.labels.data(),
-                                                                          n_rows),
-    raft::make_device_matrix_view<host_counter_type, host_index_type>(
-      counts, host_index_type{1}, n_clusters),
-    n_clusters,
-    false);
-  raft::update_host(host_labels + offset, prediction.labels.data(), n_rows, stream);
-}
-
-using host_matrix_view_type = raft::host_matrix_view<const float, host_index_type>;
-using host_batch_iterator =
-  cuvs::spatial::knn::detail::utils::batch_load_iterator<host_matrix_view_type>;
-
-struct host_balancing_em_state {
+struct host_balancing_em_state : host_balancing_em_state_base {
   host_balancing_em_state(const raft::resources& handle,
                           const cuvs::cluster::kmeans::balanced_params& params,
                           host_matrix_view_type X,
@@ -1527,146 +1919,37 @@ struct host_balancing_em_state {
                           std::vector<host_counter_type>& host_sizes,
                           float lower_tolerance,
                           float upper_tolerance)
-    : handle(handle),
-      params(params),
-      X(X),
-      host_norms(host_norms),
-      n_rows(X.extent(0)),
-      dim(X.extent(1)),
-      rows_per_batch(batch_rows(params, n_rows)),
-      n_clusters(n_clusters),
-      center_elems(n_clusters * dim),
-      centers(centers),
-      host_labels(host_labels),
-      host_sizes(host_sizes),
-      lower_tolerance(lower_tolerance),
-      upper_tolerance(upper_tolerance),
-      stream(raft::resource::get_cuda_stream(handle)),
-      mr(raft::resource::get_workspace_resource_ref(handle)),
-      prediction(handle, rows_per_batch),
-      adjustment(handle, n_clusters, dim),
-      next_centers(center_elems, stream, mr),
-      sums(center_elems, stream, mr),
-      counts(n_clusters, stream, mr),
-      count_weights(rows_per_batch, stream, mr),
-      pinned_sizes(
-        raft::make_pinned_vector<host_counter_type, host_index_type>(handle, n_clusters)),
-      copy_stream(rmm::cuda_stream::flags::non_blocking),
-      batches(handle, X, rows_per_batch, copy_stream.view(), mr, true)
+    : host_balancing_em_state_base(handle,
+                                   params,
+                                   X,
+                                   host_norms,
+                                   n_clusters,
+                                   centers,
+                                   host_labels,
+                                   &host_sizes,
+                                   batch_rows(params, X.extent(0)),
+                                   lower_tolerance,
+                                   upper_tolerance,
+                                   raft::identity_op{},
+                                   raft::resource::get_workspace_resource_ref(handle)),
+      adjustment(handle, n_clusters, X.extent(1))
   {
-    raft::matrix::fill(handle,
-                       raft::make_device_vector_view<host_counter_type, host_index_type>(
-                         count_weights.data(), rows_per_batch),
-                       host_counter_type{1});
-  }
-
-  void process_batches(bool predict_labels)
-  {
-    raft::matrix::fill(
-      handle,
-      raft::make_device_vector_view<float, host_index_type>(sums.data(), center_elems),
-      float{0});
-    raft::matrix::fill(
-      handle,
-      raft::make_device_vector_view<host_counter_type, host_index_type>(counts.data(), n_clusters),
-      host_counter_type{0});
-
-    batches.reset();
-    batches.prefetch_next_batch();
-    for (auto const& batch : batches) {
-      process_batch(handle,
-                    params,
-                    centers,
-                    n_clusters,
-                    dim,
-                    batch.data(),
-                    static_cast<host_index_type>(batch.size()),
-                    static_cast<host_index_type>(batch.offset()),
-                    host_norms,
-                    host_labels,
-                    predict_labels,
-                    prediction,
-                    count_weights.data(),
-                    sums.data(),
-                    counts.data());
-      batches.prefetch_next_batch();
-    }
-
-    auto next_centers_view =
-      raft::make_device_vector_view<float, host_index_type>(next_centers.data(), center_elems);
-    auto counts_ptr = counts.data();
-    raft::linalg::map_offset(
-      handle,
-      next_centers_view,
-      [counts_ptr, centers = centers, dim = dim] __device__(auto i, float sum) {
-        auto offset = static_cast<host_index_type>(i);
-        auto count  = counts_ptr[offset / dim];
-        return count == 0 ? centers[offset] : sum / static_cast<float>(count);
-      },
-      raft::make_device_vector_view<const float, host_index_type>(sums.data(), center_elems));
-    raft::update_host(pinned_sizes.data_handle(), counts.data(), counts.size(), stream);
-    raft::resource::sync_stream(handle, stream);
-    raft::resource::sync_stream(handle, copy_stream.view());
-    std::copy_n(pinned_sizes.data_handle(), n_clusters, host_sizes.begin());
-  }
-
-  void initialize_centers()
-  {
-#pragma omp parallel for schedule(static)
-    for (host_index_type row = 0; row < n_rows; ++row) {
-      host_labels[row] = static_cast<host_label_type>(row % n_clusters);
-    }
-    raft::matrix::fill(handle,
-                       raft::make_device_vector_view<float, host_index_type>(centers, center_elems),
-                       float{0});
-    process_batches(false);
-    raft::copy(centers, next_centers.data(), center_elems, stream);
   }
 
   auto adjust_centers() -> bool
   {
-    return cuvs::cluster::kmeans::detail::adjust_centers(handle,
-                                                         params,
-                                                         X,
-                                                         host_labels,
-                                                         host_sizes,
-                                                         lower_tolerance,
-                                                         upper_tolerance,
-                                                         centers,
+    return cuvs::cluster::kmeans::detail::adjust_centers(this->handle,
+                                                         this->params,
+                                                         this->X,
+                                                         this->labels,
+                                                         *this->sizes,
+                                                         this->lower_tolerance,
+                                                         this->upper_tolerance,
+                                                         this->centers,
                                                          adjustment);
   }
 
-  void process_batches()
-  {
-    process_batches(true);
-    raft::copy(centers, next_centers.data(), center_elems, stream);
-  }
-
-  const raft::resources& handle;
-  const cuvs::cluster::kmeans::balanced_params& params;
-  host_matrix_view_type X;
-  const float* host_norms;
-  host_index_type n_rows;
-  host_index_type dim;
-  host_index_type rows_per_batch;
-  host_index_type n_clusters;
-  host_index_type center_elems;
-  float* centers;
-  host_label_type* host_labels;
-  std::vector<host_counter_type>& host_sizes;
-  float lower_tolerance;
-  float upper_tolerance;
-  rmm::cuda_stream_view stream;
-  rmm::device_async_resource_ref mr;
-  host_prediction_scratch prediction;
   host_adjustment_scratch adjustment;
-  rmm::device_uvector<float> next_centers;
-  rmm::device_uvector<float> sums;
-  rmm::device_uvector<host_counter_type> counts;
-  rmm::device_uvector<host_counter_type> count_weights;
-  raft::pinned_vector<host_counter_type, host_index_type> pinned_sizes;
-  rmm::cuda_stream copy_stream;
-  host_batch_iterator batches;
 };
 
 inline void balancing_em_iters(const raft::resources& handle,
