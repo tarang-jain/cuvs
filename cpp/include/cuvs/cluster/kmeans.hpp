@@ -13,6 +13,7 @@
 
 #include <cuvs/core/export.hpp>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace CUVS_EXPORT cuvs {
@@ -210,6 +211,13 @@ struct balanced_params : base_params {
    * average cluster size; in that mode, `balance_upper_tolerance` does not control donor selection.
    */
   balanced_donor_selection donor_selection = balanced_donor_selection::SizeSorted;
+
+  /**
+   * Number of samples to stage on the GPU at once when fitting host-resident data.
+   * A value of 0 processes the full dataset in one batch. Device-resident overloads ignore this
+   * setting.
+   */
+  int64_t device_buffer_samples = 0;
 };
 
 /**
@@ -608,6 +616,64 @@ void fit(const raft::resources& handle,
          raft::device_matrix_view<const float, int64_t> X,
          raft::device_matrix_view<float, int64_t> centroids,
          std::optional<raft::host_scalar_view<float>> inertia = std::nullopt);
+
+namespace detail {
+void fit(const raft::resources& handle,
+         cuvs::cluster::kmeans::balanced_params const& params,
+         raft::host_matrix_view<const float, int64_t> X,
+         raft::device_matrix_view<float, int64_t> centroids,
+         std::optional<raft::host_scalar_view<float>> inertia);
+}  // namespace detail
+
+/**
+ * @brief Find balanced clusters from host-resident float data.
+ *
+ * The coarse and final refinement stages stream the dataset in batches controlled by
+ * `params.device_buffer_samples`. Fine-cluster training gathers one mesocluster at a time into a
+ * device-resident buffer, so the complete dataset need not fit on the GPU, but the largest capped
+ * mesocluster must fit. Page-locked input memory is recommended to overlap transfers with compute.
+ *
+ * This overload currently supports `L2Expanded` and `L2SqrtExpanded` distance with
+ * `balanced_donor_selection::SizeSorted`.
+ *
+ * @code{.cpp}
+ *   raft::resources handle;
+ *   cuvs::cluster::kmeans::balanced_params params;
+ *   params.device_buffer_samples = 100000;
+ *   auto X = raft::make_host_matrix_view<const float, int64_t>(
+ *     host_data, n_samples, n_features);
+ *   auto centroids = raft::make_device_matrix<float, int64_t>(
+ *     handle, n_clusters, n_features);
+ *   cuvs::cluster::kmeans::fit(handle, params, X, centroids.view());
+ * @endcode
+ *
+ * @param[in] handle The raft resources.
+ * @param[in] params Balanced k-means parameters. `device_buffer_samples` controls the streamed
+ *                   device batch size; zero processes the full dataset in one batch.
+ * @param[in] X Host-resident row-major training data [n_samples, n_features].
+ * @param[out] centroids Device-resident output centroids [n_clusters, n_features].
+ * @param[out] inertia Optional sum of squared distances to the final centroids.
+ */
+
+template <typename HostMatrixView, typename = raft::enable_if_input_host_mdspan<HostMatrixView>>
+void fit(const raft::resources& handle,
+         cuvs::cluster::kmeans::balanced_params const& params,
+         HostMatrixView X,
+         raft::device_matrix_view<float, int64_t> centroids,
+         std::optional<raft::host_scalar_view<float>> inertia = std::nullopt)
+{
+  static_assert(std::is_same_v<typename HostMatrixView::element_type, const float>);
+  static_assert(std::is_same_v<typename HostMatrixView::index_type, int64_t>);
+  static_assert(std::is_same_v<typename HostMatrixView::layout_type, raft::layout_c_contiguous>);
+  static_assert(HostMatrixView::rank() == 2);
+  RAFT_EXPECTS(X.is_exhaustive(), "Host balanced k-means input must be contiguous");
+  detail::fit(
+    handle,
+    params,
+    raft::make_host_matrix_view<const float, int64_t>(X.data_handle(), X.extent(0), X.extent(1)),
+    centroids,
+    inertia);
+}
 
 /**
  * @brief Find balanced clusters with k-means algorithm.

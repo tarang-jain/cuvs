@@ -9,6 +9,7 @@
 
 #include <raft/core/handle.hpp>
 #include <raft/core/operators.hpp>
+#include <raft/core/pinned_mdarray.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
 #include <raft/linalg/unary_op.cuh>
 #include <raft/random/make_blobs.cuh>
@@ -275,5 +276,66 @@ KB_TEST((KmeansBalancedTest<int8_t, float, uint32_t, int, i2f_scaler<int8_t, flo
 KB_TEST((KmeansBalancedTest<int8_t, float, int, int, i2f_scaler<int8_t, float>, true>),
         KmeansBalancedTestFI8I32I32_SEP,
         inputsf_i32);
+
+TEST(KmeansBalancedHostTest, BatchedFit)
+{
+  constexpr int64_t n_rows     = 4096;
+  constexpr int64_t n_cols     = 16;
+  constexpr int64_t n_clusters = 16;
+  raft::handle_t handle;
+  auto stream = raft::resource::get_cuda_stream(handle);
+
+  auto device_data = raft::make_device_matrix<float, int64_t>(handle, n_rows, n_cols);
+  auto blob_labels = raft::make_device_vector<int64_t, int64_t>(handle, n_rows);
+  raft::random::make_blobs<float, int64_t>(device_data.data_handle(),
+                                           blob_labels.data_handle(),
+                                           n_rows,
+                                           n_cols,
+                                           n_clusters,
+                                           stream.get(),
+                                           true,
+                                           nullptr,
+                                           nullptr,
+                                           0.05f,
+                                           true,
+                                           -1.0f,
+                                           1.0f,
+                                           1234);
+  auto reference_labels = raft::make_device_vector<int, int64_t>(handle, n_rows);
+  raft::linalg::unaryOp(reference_labels.data_handle(),
+                        blob_labels.data_handle(),
+                        n_rows,
+                        raft::cast_op<int>(),
+                        stream);
+
+  auto pinned_data = raft::make_pinned_matrix<float, int64_t>(handle, n_rows, n_cols);
+  raft::update_host(pinned_data.data_handle(), device_data.data_handle(), n_rows * n_cols, stream);
+  raft::resource::sync_stream(handle, stream);
+  auto host_data =
+    raft::make_host_matrix_view<const float, int64_t>(pinned_data.data_handle(), n_rows, n_cols);
+
+  cuvs::cluster::kmeans::balanced_params params;
+  params.n_iters               = 10;
+  params.metric                = cuvs::distance::DistanceType::L2Expanded;
+  params.device_buffer_samples = 512;
+  auto centroids = raft::make_device_matrix<float, int64_t>(handle, n_clusters, n_cols);
+  float inertia  = 0.0f;
+  cuvs::cluster::kmeans::fit(
+    handle, params, host_data, centroids.view(), raft::make_host_scalar_view(&inertia));
+
+  auto labels = raft::make_device_vector<int, int64_t>(handle, n_rows);
+  cuvs::cluster::kmeans::predict(handle,
+                                 params,
+                                 raft::make_const_mdspan(device_data.view()),
+                                 raft::make_const_mdspan(centroids.view()),
+                                 labels.view());
+  raft::resource::sync_stream(handle, stream);
+
+  auto score = raft::stats::adjusted_rand_index(
+    reference_labels.data_handle(), labels.data_handle(), static_cast<int>(n_rows), stream.get());
+  EXPECT_GT(score, 0.99);
+  EXPECT_TRUE(std::isfinite(inertia));
+  EXPECT_GT(inertia, 0.0f);
+}
 
 }  // namespace cuvs

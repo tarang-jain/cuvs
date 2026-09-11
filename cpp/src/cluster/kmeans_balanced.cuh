@@ -54,6 +54,7 @@ namespace cuvs::cluster::kmeans_balanced {
  * @tparam DataT Type of the input data.
  * @tparam MathT Type of the centroids and mapped data.
  * @tparam IndexT Type used for indexing.
+ * @tparam Accessor Accessor policy (host or device); deduced from X.
  * @tparam MappingOpT Type of the mapping function.
  * @param[in]  handle     The raft resources
  * @param[in]  params     Structure containing the hyper-parameters
@@ -65,10 +66,14 @@ namespace cuvs::cluster::kmeans_balanced {
  * @param[out] inertia    (optional) Sum of squared distances of samples to their
  *                        closest cluster center.
  */
-template <typename DataT, typename MathT, typename IndexT, typename MappingOpT = raft::identity_op>
+template <typename DataT,
+          typename MathT,
+          typename IndexT,
+          typename Accessor,
+          typename MappingOpT = raft::identity_op>
 void fit(const raft::resources& handle,
          cuvs::cluster::kmeans::balanced_params const& params,
-         raft::device_matrix_view<const DataT, IndexT> X,
+         raft::mdspan<const DataT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
          raft::device_matrix_view<MathT, IndexT> centroids,
          MappingOpT mapping_op                                = raft::identity_op(),
          std::optional<raft::host_scalar_view<MathT>> inertia = std::nullopt)
@@ -84,15 +89,8 @@ void fit(const raft::resources& handle,
 
   MathT* inertia_ptr = inertia.has_value() ? inertia.value().data_handle() : nullptr;
 
-  cuvs::cluster::kmeans::detail::build_hierarchical(handle,
-                                                    params,
-                                                    X.extent(1),
-                                                    X.data_handle(),
-                                                    X.extent(0),
-                                                    centroids.data_handle(),
-                                                    centroids.extent(0),
-                                                    mapping_op,
-                                                    inertia_ptr);
+  cuvs::cluster::kmeans::detail::build_hierarchical(
+    handle, params, X, centroids.data_handle(), centroids.extent(0), mapping_op, inertia_ptr);
 }
 
 /**

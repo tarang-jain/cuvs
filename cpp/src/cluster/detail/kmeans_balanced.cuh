@@ -1119,198 +1119,282 @@ auto build_fine_clusters(const raft::resources& handle,
   return n_clusters_done;
 }
 
+}  // namespace  cuvs::cluster::kmeans::detail
+
+#include "kmeans_balanced_batch.cuh"
+
+namespace cuvs::cluster::kmeans::detail {
+
 /**
- * @brief Hierarchical balanced k-means
+ * @brief Hierarchical balanced k-means for host- or device-resident input.
  *
- * @tparam T          element type
- * @tparam MathT      type of the centroids and mapped data
- * @tparam IdxT       index type
- * @tparam MappingOpT type of the mapping operation
+ * Device input follows the existing in-core path. Host input streams the coarse and global
+ * refinement passes, then gathers each mesocluster from host memory into a double-buffered,
+ * device-resident fine-training buffer.
  *
- * @param[in]  handle          The raft handle.
- * @param[in]  params          Structure containing the hyper-parameters
- * @param[in]  dim             Number of columns in `cluster_centers` and `dataset`
- * @param[in]  dataset         A device pointer to the source dataset [n_rows, dim]
- * @param[in]  n_rows          Number of rows in the input
- * @param[out] cluster_centers A device pointer to the found cluster centers [n_clusters, dim]
- * @param[in]  n_clusters      Requested number of clusters
- * @param[in]  mapping_op      Mapping operation from T to MathT
- * @param[out] inertia         (optional) If non-null, the sum of squared distances of samples to
- *                             their closest cluster center is written here.
- *                             Only supported when T == MathT (float/double).
+ * @tparam T Input element type.
+ * @tparam MathT Arithmetic and centroid type.
+ * @tparam IdxT Index type.
+ * @tparam Accessor Input accessor policy; determines host or device processing at compile time.
+ * @tparam MappingOpT Mapping operation from T to MathT.
+ *
+ * @param[in] handle The raft resources.
+ * @param[in] params Balanced k-means parameters.
+ * @param[in] X Row-major input data [n_rows, dim].
+ * @param[out] cluster_centers Output cluster centers [n_clusters, dim].
+ * @param[in] n_clusters Number of requested clusters.
+ * @param[in] mapping_op Mapping operation from T to MathT.
+ * @param[out] inertia Optional sum of squared distances to the final centers.
  */
-template <typename T, typename MathT, typename IdxT, typename MappingOpT>
-void build_hierarchical(const raft::resources& handle,
-                        const cuvs::cluster::kmeans::balanced_params& params,
-                        IdxT dim,
-                        const T* dataset,
-                        IdxT n_rows,
-                        MathT* cluster_centers,
-                        IdxT n_clusters,
-                        MappingOpT mapping_op,
-                        MathT* inertia = nullptr)
+template <typename T, typename MathT, typename IdxT, typename Accessor, typename MappingOpT>
+void build_hierarchical(
+  const raft::resources& handle,
+  const cuvs::cluster::kmeans::balanced_params& params,
+  raft::mdspan<const T, raft::matrix_extent<IdxT>, raft::row_major, Accessor> X,
+  MathT* cluster_centers,
+  IdxT n_clusters,
+  MappingOpT mapping_op,
+  MathT* inertia = nullptr)
 {
-  auto stream  = raft::resource::get_cuda_stream(handle);
-  using LabelT = uint32_t;
+  constexpr bool data_on_device = raft::is_device_mdspan_v<decltype(X)>;
+  if constexpr (!data_on_device) {
+    static_assert(std::is_same_v<T, float>);
+    static_assert(std::is_same_v<MathT, float>);
+    static_assert(std::is_same_v<IdxT, int64_t>);
+    RAFT_EXPECTS(params.metric == cuvs::distance::DistanceType::L2Expanded ||
+                   params.metric == cuvs::distance::DistanceType::L2SqrtExpanded,
+                 "Host balanced k-means currently supports L2Expanded and L2SqrtExpanded");
+    RAFT_EXPECTS(
+      params.donor_selection == cuvs::cluster::kmeans::balanced_donor_selection::SizeSorted,
+      "Host balanced k-means currently supports SizeSorted donor selection");
+  }
+
+  RAFT_EXPECTS(params.balance_lower_tolerance > 0.0f && params.balance_lower_tolerance < 1.0f,
+               "Balanced k-means lower balance tolerance must be in the range (0, 1)");
+  RAFT_EXPECTS(params.balance_upper_tolerance > 1.0f,
+               "Balanced k-means upper balance tolerance must be greater than 1");
+  RAFT_EXPECTS(params.centroid_offset > 0.0f && params.centroid_offset <= 1.0f,
+               "Balanced k-means centroid offset must be in the range (0, 1]");
+
+  auto stream    = raft::resource::get_cuda_stream(handle);
+  auto n_rows    = X.extent(0);
+  auto dim       = X.extent(1);
+  auto dataset   = X.data_handle();
+  using LabelT   = uint32_t;
+  using CounterT = std::conditional_t<sizeof(IdxT) == 8, unsigned long long int, unsigned int>;
 
   raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> fun_scope(
     "build_hierarchical(%zu, %u)", static_cast<size_t>(n_rows), n_clusters);
 
-  IdxT n_mesoclusters = std::min(n_clusters, static_cast<IdxT>(std::sqrt(n_clusters) + 0.5));
+  auto n_mesoclusters = std::min(n_clusters, static_cast<IdxT>(std::sqrt(n_clusters) + 0.5));
   RAFT_LOG_DEBUG("build_hierarchical: n_mesoclusters: %u", n_mesoclusters);
 
-  // TODO: Remove the explicit managed memory- we shouldn't be creating this on the user's behalf.
   rmm::mr::managed_memory_resource managed_memory;
-  rmm::device_async_resource_ref device_memory = raft::resource::get_workspace_resource_ref(handle);
-  auto [max_minibatch_size, mem_per_row]       = calc_minibatch_size<MathT>(
-    handle, n_clusters, n_rows, dim, params.metric, std::is_same_v<T, MathT>);
+  auto device_memory = raft::resource::get_workspace_resource_ref(handle);
+  auto needs_norm    = params.metric == cuvs::distance::DistanceType::L2Expanded ||
+                    params.metric == cuvs::distance::DistanceType::L2SqrtExpanded ||
+                    params.metric == cuvs::distance::DistanceType::CosineExpanded;
+  auto rows_per_batch =
+    data_on_device ? n_rows : host_balanced::batch_rows(params, static_cast<int64_t>(n_rows));
 
-  // Precompute the L2 norm of the dataset if relevant and not yet computed.
-  rmm::device_uvector<MathT> dataset_norm_buf(0, stream, device_memory);
+  rmm::device_uvector<MathT> device_norms(
+    data_on_device && needs_norm ? n_rows : 0, stream, device_memory);
+  auto host_norms =
+    raft::make_pinned_vector<MathT, IdxT>(handle, !data_on_device && needs_norm ? n_rows : 0);
   const MathT* dataset_norm = nullptr;
-  if ((params.metric == cuvs::distance::DistanceType::L2Expanded ||
-       params.metric == cuvs::distance::DistanceType::L2SqrtExpanded ||
-       params.metric == cuvs::distance::DistanceType::CosineExpanded)) {
-    dataset_norm_buf.resize(n_rows, stream);
-    for (IdxT offset = 0; offset < n_rows; offset += max_minibatch_size) {
-      IdxT minibatch_size = std::min<IdxT>(max_minibatch_size, n_rows - offset);
-      if (params.metric == cuvs::distance::DistanceType::CosineExpanded)
-        compute_norm(handle,
-                     dataset_norm_buf.data() + offset,
-                     dataset + dim * offset,
-                     dim,
-                     minibatch_size,
-                     mapping_op,
-                     raft::sqrt_op{},
-                     device_memory);
-      else
-        compute_norm(handle,
-                     dataset_norm_buf.data() + offset,
-                     dataset + dim * offset,
-                     dim,
-                     minibatch_size,
-                     mapping_op,
-                     raft::identity_op{},
-                     device_memory);
+  if constexpr (data_on_device) {
+    if (needs_norm) {
+      auto [max_minibatch_size, _] = calc_minibatch_size<MathT>(
+        handle, n_clusters, n_rows, dim, params.metric, std::is_same_v<T, MathT>);
+      for (IdxT offset = 0; offset < n_rows; offset += max_minibatch_size) {
+        auto minibatch_size = std::min<IdxT>(max_minibatch_size, n_rows - offset);
+        if (params.metric == cuvs::distance::DistanceType::CosineExpanded) {
+          compute_norm(handle,
+                       device_norms.data() + offset,
+                       dataset + dim * offset,
+                       dim,
+                       minibatch_size,
+                       mapping_op,
+                       raft::sqrt_op{},
+                       device_memory);
+        } else {
+          compute_norm(handle,
+                       device_norms.data() + offset,
+                       dataset + dim * offset,
+                       dim,
+                       minibatch_size,
+                       mapping_op,
+                       raft::identity_op{},
+                       device_memory);
+        }
+      }
+      dataset_norm = device_norms.data();
     }
-    dataset_norm = (const MathT*)dataset_norm_buf.data();
+  } else {
+    host_balanced::compute_norms(handle, X, rows_per_batch, host_norms.data_handle());
+    dataset_norm = host_norms.data_handle();
   }
 
-  /* Temporary workaround to cub::DeviceHistogram not supporting any type that isn't natively
-   * supported by atomicAdd: find a supported CounterT based on the IdxT. */
-  typedef typename std::conditional_t<sizeof(IdxT) == 8, unsigned long long int, unsigned int>
-    CounterT;
-
-  // build coarse clusters (mesoclusters)
-  rmm::device_uvector<LabelT> mesocluster_labels_buf(n_rows, stream, managed_memory);
-  rmm::device_uvector<CounterT> mesocluster_sizes_buf(n_mesoclusters, stream, managed_memory);
+  rmm::device_uvector<LabelT> device_mesocluster_labels(
+    data_on_device ? n_rows : 0, stream, managed_memory);
+  auto host_mesocluster_labels =
+    raft::make_pinned_vector<LabelT, IdxT>(handle, data_on_device ? 0 : n_rows);
+  auto* mesocluster_labels =
+    data_on_device ? device_mesocluster_labels.data() : host_mesocluster_labels.data_handle();
+  std::vector<CounterT> mesocluster_sizes(n_mesoclusters);
   {
-    rmm::device_uvector<MathT> mesocluster_centers_buf(n_mesoclusters * dim, stream, device_memory);
-    build_clusters(handle,
-                   params,
-                   dim,
-                   dataset,
-                   n_rows,
-                   n_mesoclusters,
-                   mesocluster_centers_buf.data(),
-                   mesocluster_labels_buf.data(),
-                   mesocluster_sizes_buf.data(),
-                   mapping_op,
-                   device_memory,
-                   dataset_norm);
+    rmm::device_uvector<MathT> mesocluster_centers(n_mesoclusters * dim, stream, device_memory);
+    if constexpr (data_on_device) {
+      rmm::device_uvector<CounterT> device_mesocluster_sizes(n_mesoclusters, stream, device_memory);
+      build_clusters(handle,
+                     params,
+                     dim,
+                     dataset,
+                     n_rows,
+                     n_mesoclusters,
+                     mesocluster_centers.data(),
+                     mesocluster_labels,
+                     device_mesocluster_sizes.data(),
+                     mapping_op,
+                     device_memory,
+                     dataset_norm);
+      raft::update_host(
+        mesocluster_sizes.data(), device_mesocluster_sizes.data(), n_mesoclusters, stream);
+      raft::resource::sync_stream(handle, stream);
+    } else {
+      host_balanced::streamed_balanced_em(handle,
+                                          params,
+                                          X,
+                                          dataset_norm,
+                                          n_mesoclusters,
+                                          mesocluster_centers.data(),
+                                          mesocluster_labels,
+                                          mesocluster_sizes,
+                                          params.n_iters,
+                                          2,
+                                          params.balance_lower_tolerance,
+                                          params.balance_upper_tolerance,
+                                          true);
+    }
   }
 
-  auto mesocluster_sizes  = mesocluster_sizes_buf.data();
-  auto mesocluster_labels = mesocluster_labels_buf.data();
+  auto [mesocluster_size_max, fine_clusters_max, fine_cluster_counts, fine_cluster_offsets] =
+    arrange_fine_clusters(n_clusters, n_mesoclusters, n_rows, mesocluster_sizes.data());
 
-  raft::resource::sync_stream(handle, stream);
-
-  // build fine clusters
-  auto [mesocluster_size_max, fine_clusters_nums_max, fine_clusters_nums, fine_clusters_csum] =
-    arrange_fine_clusters(n_clusters, n_mesoclusters, n_rows, mesocluster_sizes);
-
-  const IdxT mesocluster_size_max_balanced = raft::div_rounding_up_safe<size_t>(
-    2lu * size_t(n_rows), std::max<size_t>(size_t(n_mesoclusters), 1lu));
-  if (mesocluster_size_max > mesocluster_size_max_balanced) {
+  auto balanced_max = static_cast<IdxT>(raft::div_rounding_up_safe<size_t>(
+    2lu * static_cast<size_t>(n_rows), std::max<size_t>(static_cast<size_t>(n_mesoclusters), 1lu)));
+  if (mesocluster_size_max > balanced_max) {
     RAFT_LOG_DEBUG(
       "build_hierarchical: built unbalanced mesoclusters (max_mesocluster_size == %u > %u). "
       "At most %u points will be used for training within each mesocluster. "
-      "Consider increasing the number of training iterations `n_iters`.",
+      "Consider increasing the number of training iterations n_iters.",
       mesocluster_size_max,
-      mesocluster_size_max_balanced,
-      mesocluster_size_max_balanced);
-    RAFT_LOG_TRACE_VEC(mesocluster_sizes, n_mesoclusters);
-    RAFT_LOG_TRACE_VEC(fine_clusters_nums.data(), n_mesoclusters);
-    mesocluster_size_max = mesocluster_size_max_balanced;
+      balanced_max,
+      balanced_max);
+    RAFT_LOG_TRACE_VEC(mesocluster_sizes.data(), n_mesoclusters);
+    RAFT_LOG_TRACE_VEC(fine_cluster_counts.data(), n_mesoclusters);
+    mesocluster_size_max = balanced_max;
   }
 
-  auto n_clusters_done = build_fine_clusters(handle,
-                                             params,
-                                             dim,
-                                             dataset,
-                                             dataset_norm,
-                                             mesocluster_labels,
-                                             n_rows,
-                                             fine_clusters_nums.data(),
-                                             fine_clusters_csum.data(),
-                                             mesocluster_sizes,
-                                             n_mesoclusters,
-                                             mesocluster_size_max,
-                                             fine_clusters_nums_max,
-                                             cluster_centers,
-                                             mapping_op,
-                                             managed_memory,
-                                             device_memory);
-  RAFT_EXPECTS(n_clusters_done == n_clusters, "Didn't process all clusters.");
+  IdxT clusters_done;
+  if constexpr (data_on_device) {
+    clusters_done = build_fine_clusters(handle,
+                                        params,
+                                        dim,
+                                        dataset,
+                                        dataset_norm,
+                                        mesocluster_labels,
+                                        n_rows,
+                                        fine_cluster_counts.data(),
+                                        fine_cluster_offsets.data(),
+                                        mesocluster_sizes.data(),
+                                        n_mesoclusters,
+                                        mesocluster_size_max,
+                                        fine_clusters_max,
+                                        cluster_centers,
+                                        mapping_op,
+                                        managed_memory,
+                                        device_memory);
+  } else {
+    clusters_done = host_balanced::build_fine_clusters(handle,
+                                                       params,
+                                                       X,
+                                                       dataset_norm,
+                                                       mesocluster_labels,
+                                                       fine_cluster_counts.data(),
+                                                       fine_cluster_offsets.data(),
+                                                       mesocluster_sizes.data(),
+                                                       n_mesoclusters,
+                                                       mesocluster_size_max,
+                                                       fine_clusters_max,
+                                                       cluster_centers);
+  }
+  RAFT_EXPECTS(clusters_done == n_clusters, "Didn't process all clusters.");
 
-  rmm::device_uvector<CounterT> cluster_sizes(n_clusters, stream, device_memory);
-  rmm::device_uvector<LabelT> labels(n_rows, stream, device_memory);
-
-  // Fine-tuning k-means for all clusters
-  //
-  // (*) Since the likely cluster centroids have been calculated hierarchically already, the number
-  // of iterations for fine-tuning kmeans for whole clusters should be reduced. However, there is a
-  // possibility that the clusters could be unbalanced here, in which case the actual number of
-  // iterations would be increased.
-  //
-  uint32_t n_iters            = std::max<uint32_t>(params.n_iters / 10, 2);
-  const float relaxing_factor = 1.0f;
-  MathT balance_lower_tolerance =
+  auto global_iters               = std::max<uint32_t>(params.n_iters / 10, 2);
+  constexpr float relaxing_factor = 1.0f;
+  auto balance_lower_tolerance =
     static_cast<MathT>(params.balance_lower_tolerance * relaxing_factor);
-  MathT balance_upper_tolerance =
+  auto balance_upper_tolerance =
     static_cast<MathT>(params.balance_upper_tolerance / relaxing_factor);
-  RAFT_LOG_DEBUG(
-    "n_iters: %u, tolerance: %f, %f\n", n_iters, balance_lower_tolerance, balance_upper_tolerance);
-  balancing_em_iters(handle,
-                     params,
-                     n_iters,
-                     dim,
-                     dataset,
-                     dataset_norm,
-                     n_rows,
-                     n_clusters,
-                     cluster_centers,
-                     labels.data(),
-                     cluster_sizes.data(),
-                     5,
-                     balance_lower_tolerance,
-                     balance_upper_tolerance,
-                     mapping_op,
-                     device_memory);
+  RAFT_LOG_DEBUG("n_iters: %u, tolerance: %f, %f\n",
+                 global_iters,
+                 balance_lower_tolerance,
+                 balance_upper_tolerance);
 
-  // Compute inertia if requested (only supported when T == MathT)
+  if constexpr (data_on_device) {
+    rmm::device_uvector<CounterT> cluster_sizes(n_clusters, stream, device_memory);
+    rmm::device_uvector<LabelT> labels(n_rows, stream, device_memory);
+    balancing_em_iters(handle,
+                       params,
+                       global_iters,
+                       dim,
+                       dataset,
+                       dataset_norm,
+                       n_rows,
+                       n_clusters,
+                       cluster_centers,
+                       labels.data(),
+                       cluster_sizes.data(),
+                       5,
+                       balance_lower_tolerance,
+                       balance_upper_tolerance,
+                       mapping_op,
+                       device_memory);
+  } else {
+    std::vector<CounterT> cluster_sizes(n_clusters);
+    host_balanced::streamed_balanced_em(handle,
+                                        params,
+                                        X,
+                                        dataset_norm,
+                                        n_clusters,
+                                        cluster_centers,
+                                        mesocluster_labels,
+                                        cluster_sizes,
+                                        global_iters,
+                                        5,
+                                        balance_lower_tolerance,
+                                        balance_upper_tolerance,
+                                        false);
+  }
+
   if (inertia != nullptr) {
-    if constexpr (std::is_same_v<T, MathT>) {
-      auto X_view = raft::make_device_matrix_view<const MathT, IdxT>(
-        reinterpret_cast<const MathT*>(dataset), n_rows, dim);
-      auto centroids_view =
-        raft::make_device_matrix_view<const MathT, IdxT>(cluster_centers, n_clusters, dim);
-      cuvs::cluster::kmeans::cluster_cost(
-        handle, X_view, centroids_view, raft::make_host_scalar_view<MathT>(inertia));
+    if constexpr (data_on_device) {
+      if constexpr (std::is_same_v<T, MathT>) {
+        auto data_view = raft::make_device_matrix_view<const MathT, IdxT>(
+          reinterpret_cast<const MathT*>(dataset), n_rows, dim);
+        auto centroids_view =
+          raft::make_device_matrix_view<const MathT, IdxT>(cluster_centers, n_clusters, dim);
+        cuvs::cluster::kmeans::cluster_cost(
+          handle, data_view, centroids_view, raft::make_host_scalar_view<MathT>(inertia));
+      } else {
+        RAFT_LOG_WARN("Inertia is not computed for non float/double types");
+      }
     } else {
-      RAFT_LOG_WARN("Inertia is not computed for non float/double types");
+      *inertia =
+        host_balanced::compute_inertia(handle, X, rows_per_batch, cluster_centers, n_clusters);
     }
   }
 }
 
-}  // namespace  cuvs::cluster::kmeans::detail
+}  // namespace cuvs::cluster::kmeans::detail
