@@ -14,11 +14,11 @@
 #include <cuvs/core/c_api.h>
 #include <cuvs/distance/distance.hpp>
 #include <cuvs/neighbors/all_neighbors.h>
-#include <cuvs/neighbors/ivf_pq.h>
-#include <cuvs/neighbors/nn_descent.h>
 #include <cuvs/neighbors/all_neighbors.hpp>
 #include <cuvs/neighbors/brute_force.hpp>
+#include <cuvs/neighbors/ivf_pq.h>
 #include <cuvs/neighbors/ivf_pq.hpp>
+#include <cuvs/neighbors/nn_descent.h>
 #include <cuvs/neighbors/nn_descent.hpp>
 
 #include "../core/exceptions.hpp"
@@ -66,12 +66,18 @@ static cuvs::neighbors::all_neighbors::all_neighbors_params convert_params(
       break;
     }
     case CUVS_ALL_NEIGHBORS_ALGO_IVF_PQ: {
-      auto dataset_extents = raft::matrix_extent<int64_t>{n_rows, n_cols};
+      auto sizing_rows     = p.ivf_pq_sizing_rows > 0 ? p.ivf_pq_sizing_rows : n_rows;
+      auto dataset_extents = raft::matrix_extent<int64_t>{sizing_rows, n_cols};
       graph_build_params::ivf_pq_params ivf(dataset_extents, out.metric);
       // Use ivf_pq_params if provided, otherwise use defaults
       if (p.ivf_pq_params != nullptr) {
         cuvs::neighbors::ivf_pq::convert_c_index_params(*p.ivf_pq_params, &ivf.build_params);
       }
+      if (p.ivf_pq_search_params != nullptr) {
+        cuvs::neighbors::ivf_pq::convert_c_search_params(*p.ivf_pq_search_params,
+                                                         &ivf.search_params);
+      }
+      if (p.ivf_pq_refinement_rate > 0.0f) { ivf.refinement_rate = p.ivf_pq_refinement_rate; }
       out.graph_build_params = ivf;
       break;
     }
@@ -228,7 +234,10 @@ extern "C" cuvsError_t cuvsAllNeighborsIndexParamsCreate(cuvsAllNeighborsIndexPa
     (*params)->n_clusters        = 1;
     (*params)->metric            = L2Expanded;
     (*params)->ivf_pq_params     = nullptr;
-    (*params)->nn_descent_params = nullptr;
+    (*params)->ivf_pq_search_params   = nullptr;
+    (*params)->ivf_pq_refinement_rate = 1.0f;
+    (*params)->ivf_pq_sizing_rows     = 0;
+    (*params)->nn_descent_params      = nullptr;
   });
 }
 
@@ -237,6 +246,9 @@ extern "C" cuvsError_t cuvsAllNeighborsIndexParamsDestroy(cuvsAllNeighborsIndexP
   return cuvs::core::translate_exceptions([=] {
     if (params != nullptr) {
       if (params->ivf_pq_params != nullptr) { cuvsIvfPqIndexParamsDestroy(params->ivf_pq_params); }
+      if (params->ivf_pq_search_params != nullptr) {
+        cuvsIvfPqSearchParamsDestroy(params->ivf_pq_search_params);
+      }
       if (params->nn_descent_params != nullptr) {
         cuvsNNDescentIndexParamsDestroy(params->nn_descent_params);
       }

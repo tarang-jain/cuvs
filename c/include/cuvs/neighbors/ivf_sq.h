@@ -146,6 +146,9 @@ CUVS_EXPORT cuvsError_t cuvsIvfSqIndexCreate(cuvsIvfSqIndex_t* index);
  */
 CUVS_EXPORT cuvsError_t cuvsIvfSqIndexDestroy(cuvsIvfSqIndex_t index);
 
+/** Remove all vectors while preserving the trained IVF-SQ state. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexReset(cuvsResources_t res, cuvsIvfSqIndex_t index);
+
 /** Get the number of clusters/inverted lists */
 CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetNLists(cuvsIvfSqIndex_t index, int64_t* n_lists);
 
@@ -163,6 +166,27 @@ CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetSize(cuvsIvfSqIndex_t index, int64_t* s
  * @return cuvsError_t
  */
 CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetCenters(cuvsIvfSqIndex_t index, DLManagedTensor* centers);
+
+/** Get a non-owning device view of the list sizes [n_lists]. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetListSizes(cuvsIvfSqIndex_t index,
+                                                   DLManagedTensor* list_sizes);
+
+/** Get a non-owning device view of the vector indices in one list. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetListIndices(cuvsIvfSqIndex_t index,
+                                                     uint32_t label,
+                                                     DLManagedTensor* out_indices);
+
+/** Unpack list codes into a caller-allocated contiguous uint8 device matrix
+ * [n_rows, dim]. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexUnpackContiguousListData(cuvsResources_t res,
+                                                               cuvsIvfSqIndex_t index,
+                                                               DLManagedTensor* out_codes,
+                                                               uint32_t label,
+                                                               uint32_t offset);
+
+/** Get non-owning device views of the trained scalar-quantizer state [dim]. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetVMin(cuvsIvfSqIndex_t index, DLManagedTensor* vmin);
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetDelta(cuvsIvfSqIndex_t index, DLManagedTensor* delta);
 
 /**
  * @}
@@ -214,9 +238,20 @@ CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetCenters(cuvsIvfSqIndex_t index, DLManag
  * @return cuvsError_t
  */
 CUVS_EXPORT cuvsError_t cuvsIvfSqBuild(cuvsResources_t res,
-                           cuvsIvfSqIndexParams_t index_params,
-                           DLManagedTensor* dataset,
-                           cuvsIvfSqIndex_t index);
+                                       cuvsIvfSqIndexParams_t index_params,
+                                       DLManagedTensor* dataset,
+                                       cuvsIvfSqIndex_t index);
+
+/** Build an empty IVF-SQ index from coarse centers and trained scalar-quantizer
+ * state. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqBuildFromCenters(cuvsResources_t res,
+                                                  cuvsIvfSqIndexParams_t index_params,
+                                                  DLDataType index_dtype,
+                                                  DLManagedTensor* centers,
+                                                  DLManagedTensor* center_norms,
+                                                  DLManagedTensor* vmin,
+                                                  DLManagedTensor* delta,
+                                                  cuvsIvfSqIndex_t index);
 /**
  * @}
  */
@@ -340,6 +375,13 @@ CUVS_EXPORT cuvsError_t cuvsIvfSqExtend(cuvsResources_t res,
                             DLManagedTensor* new_vectors,
                             DLManagedTensor* new_indices,
                             cuvsIvfSqIndex_t index);
+
+/** Append already-encoded contiguous SQ codes and indices to one list. */
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexExtendList(cuvsResources_t res,
+                                                 cuvsIvfSqIndex_t index,
+                                                 DLManagedTensor* new_codes,
+                                                 DLManagedTensor* new_indices,
+                                                 uint32_t label);
 /**
  * @}
  */

@@ -3,15 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
 #include <cstdint>
-#include <optional>
 #include <dlpack/dlpack.h>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include <raft/core/copy.hpp>
+#include <raft/core/device_mdarray.hpp>
 
 #include <raft/core/error.hpp>
 #include <raft/core/mdspan_types.hpp>
 #include <raft/core/resources.hpp>
 
 #include <cuvs/core/c_api.h>
+#include <cuvs/neighbors/ivf_flat.hpp>
 #include <cuvs/neighbors/ivf_sq.h>
 #include <cuvs/neighbors/ivf_sq.hpp>
 
@@ -372,4 +380,262 @@ extern "C" cuvsError_t cuvsIvfSqIndexGetSize(cuvsIvfSqIndex_t index, int64_t* si
 extern "C" cuvsError_t cuvsIvfSqIndexGetCenters(cuvsIvfSqIndex_t index, DLManagedTensor* centers)
 {
   return cuvs::core::translate_exceptions([=] { _get_centers(*index, centers); });
+}
+
+extern "C" cuvsError_t cuvsIvfSqIndexGetListSizes(cuvsIvfSqIndex_t index,
+                                                  DLManagedTensor* list_sizes)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+    cuvs::core::to_dlpack(index_ptr->list_sizes(), list_sizes);
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfSqIndexGetListIndices(cuvsIvfSqIndex_t index,
+                                                    uint32_t label,
+                                                    DLManagedTensor* out_indices)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+    RAFT_EXPECTS(label < index_ptr->n_lists(), "list label is out of range");
+    RAFT_EXPECTS(index_ptr->lists()[label] != nullptr, "list has not been allocated");
+    cuvs::core::to_dlpack(index_ptr->lists()[label]->indices.view(), out_indices);
+  });
+}
+extern "C" cuvsError_t cuvsIvfSqIndexUnpackContiguousListData(cuvsResources_t res,
+                                                              cuvsIvfSqIndex_t index,
+                                                              DLManagedTensor* out_codes,
+                                                              uint32_t label,
+                                                              uint32_t offset)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+    RAFT_EXPECTS(label < index_ptr->n_lists(), "list label is out of range");
+    RAFT_EXPECTS(index_ptr->lists()[label] != nullptr, "list has not been allocated");
+    using output_type = raft::device_matrix_view<uint8_t, uint32_t, raft::row_major>;
+    auto output       = cuvs::core::from_dlpack<output_type>(out_codes);
+    auto logical_dim  = index_ptr->dim();
+    RAFT_EXPECTS(output.extent(1) == logical_dim, "output dimensionality does not match index");
+
+    auto* res_ptr   = reinterpret_cast<raft::resources*>(res);
+    auto list_data  = raft::make_const_mdspan(index_ptr->lists()[label]->data.view());
+    auto padded_dim = list_data.extent(1);
+    constexpr uint32_t vec_len =
+      cuvs::neighbors::ivf_sq::list_spec<uint32_t, uint8_t, int64_t>::kVecLen;
+    if (logical_dim == padded_dim) {
+      cuvs::neighbors::ivf_flat::helpers::codepacker::unpack(
+        *res_ptr, list_data, vec_len, offset, output);
+      return;
+    }
+
+    auto padded =
+      raft::make_device_matrix<uint8_t, uint32_t>(*res_ptr, output.extent(0), padded_dim);
+    cuvs::neighbors::ivf_flat::helpers::codepacker::unpack(
+      *res_ptr, list_data, vec_len, offset, padded.view());
+    auto stream = raft::resource::get_cuda_stream(*res_ptr);
+    RAFT_CUDA_TRY(cudaMemcpy2DAsync(output.data_handle(),
+                                    logical_dim * sizeof(uint8_t),
+                                    padded.data_handle(),
+                                    padded_dim * sizeof(uint8_t),
+                                    logical_dim * sizeof(uint8_t),
+                                    output.extent(0),
+                                    cudaMemcpyDeviceToDevice,
+                                    stream));
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfSqIndexGetVMin(cuvsIvfSqIndex_t index, DLManagedTensor* vmin)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+    cuvs::core::to_dlpack(index_ptr->sq_vmin(), vmin);
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfSqIndexGetDelta(cuvsIvfSqIndex_t index, DLManagedTensor* delta)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+    cuvs::core::to_dlpack(index_ptr->sq_delta(), delta);
+  });
+}
+
+namespace {
+
+void ivf_sq_recompute_internal_state(raft::resources const& res, index_type* index)
+{
+  auto n_lists = index->n_lists();
+  auto stream  = raft::resource::get_cuda_stream(res);
+  std::vector<uint32_t> sizes(n_lists);
+  std::vector<uint8_t*> data_ptrs(n_lists);
+  std::vector<int64_t*> inds_ptrs(n_lists);
+
+  raft::update_host(sizes.data(), index->list_sizes().data_handle(), n_lists, stream);
+  for (uint32_t label = 0; label < n_lists; ++label) {
+    auto const& list = index->lists()[label];
+    data_ptrs[label] = list ? list->data.data_handle() : nullptr;
+    inds_ptrs[label] = list ? list->indices.data_handle() : nullptr;
+  }
+  raft::update_device(index->data_ptrs().data_handle(), data_ptrs.data(), n_lists, stream);
+  raft::update_device(index->inds_ptrs().data_handle(), inds_ptrs.data(), n_lists, stream);
+  raft::resource::sync_stream(res);
+
+  std::sort(sizes.begin(), sizes.end(), std::greater<uint32_t>{});
+  auto accumulated = index->accum_sorted_sizes();
+  accumulated(0)   = 0;
+  for (uint32_t label = 0; label < n_lists; ++label) {
+    accumulated(label + 1) = accumulated(label) + sizes[label];
+  }
+}
+
+void ivf_sq_copy_trained_state(raft::resources const& res,
+                               index_type* destination,
+                               index_type const* source)
+{
+  raft::copy(res, destination->centers(), source->centers());
+  raft::copy(res, destination->sq_vmin(), source->sq_vmin());
+  raft::copy(res, destination->sq_delta(), source->sq_delta());
+  if (source->center_norms().has_value()) {
+    destination->allocate_center_norms(res);
+    raft::copy(res, destination->center_norms().value(), source->center_norms().value());
+  }
+}
+
+void ivf_sq_extend_list(cuvsResources_t res,
+                        cuvsIvfSqIndex_t index,
+                        DLManagedTensor* new_codes,
+                        DLManagedTensor* new_indices,
+                        uint32_t label)
+{
+  auto* res_ptr   = reinterpret_cast<raft::resources*>(res);
+  auto* index_ptr = reinterpret_cast<index_type*>(index->addr);
+  RAFT_EXPECTS(index_ptr != nullptr, "IVF-SQ index must be built");
+  RAFT_EXPECTS(label < index_ptr->n_lists(), "list label is out of range");
+
+  using codes_type   = raft::device_matrix_view<const uint8_t, uint32_t, raft::row_major>;
+  using indices_type = raft::device_vector_view<const int64_t, uint32_t>;
+  auto codes         = cuvs::core::from_dlpack<codes_type>(new_codes);
+  auto indices       = cuvs::core::from_dlpack<indices_type>(new_indices);
+  RAFT_EXPECTS(codes.extent(0) == indices.extent(0), "codes and indices length mismatch");
+  RAFT_EXPECTS(codes.extent(1) == index_ptr->dim(), "code dimensionality mismatch");
+  if (codes.extent(0) == 0) { return; }
+
+  auto stream = raft::resource::get_cuda_stream(*res_ptr);
+  uint32_t old_size{};
+  raft::update_host(&old_size, index_ptr->list_sizes().data_handle() + label, 1, stream);
+  raft::resource::sync_stream(*res_ptr);
+  RAFT_EXPECTS(codes.extent(0) <= std::numeric_limits<uint32_t>::max() - old_size,
+               "list size exceeds uint32 range");
+  auto new_size = old_size + codes.extent(0);
+
+  auto spec = cuvs::neighbors::ivf_sq::list_spec<uint32_t, uint8_t, int64_t>{
+    index_ptr->dim(), index_ptr->conservative_memory_allocation()};
+  cuvs::neighbors::ivf::resize_list(*res_ptr, index_ptr->lists()[label], spec, new_size, old_size);
+  auto list_data   = index_ptr->lists()[label]->data.view();
+  auto logical_dim = codes.extent(1);
+  auto padded_dim  = list_data.extent(1);
+  constexpr uint32_t vec_len =
+    cuvs::neighbors::ivf_sq::list_spec<uint32_t, uint8_t, int64_t>::kVecLen;
+  if (logical_dim == padded_dim) {
+    cuvs::neighbors::ivf_flat::helpers::codepacker::pack(
+      *res_ptr, codes, vec_len, old_size, list_data);
+  } else {
+    auto padded =
+      raft::make_device_matrix<uint8_t, uint32_t>(*res_ptr, codes.extent(0), padded_dim);
+    RAFT_CUDA_TRY(
+      cudaMemsetAsync(padded.data_handle(), 0, padded.size() * sizeof(uint8_t), stream));
+    RAFT_CUDA_TRY(cudaMemcpy2DAsync(padded.data_handle(),
+                                    padded_dim * sizeof(uint8_t),
+                                    codes.data_handle(),
+                                    logical_dim * sizeof(uint8_t),
+                                    logical_dim * sizeof(uint8_t),
+                                    codes.extent(0),
+                                    cudaMemcpyDeviceToDevice,
+                                    stream));
+    cuvs::neighbors::ivf_flat::helpers::codepacker::pack(
+      *res_ptr, raft::make_const_mdspan(padded.view()), vec_len, old_size, list_data);
+  }
+  raft::copy(index_ptr->lists()[label]->indices.data_handle() + old_size,
+             indices.data_handle(),
+             indices.extent(0),
+             stream);
+  raft::copy(index_ptr->list_sizes().data_handle() + label, &new_size, 1, stream);
+  ivf_sq_recompute_internal_state(*res_ptr, index_ptr);
+}
+
+}  // namespace
+
+extern "C" cuvsError_t cuvsIvfSqIndexReset(cuvsResources_t res, cuvsIvfSqIndex_t index)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-SQ index must be built");
+    auto* res_ptr    = reinterpret_cast<raft::resources*>(res);
+    auto* index_ptr  = reinterpret_cast<index_type*>(index->addr);
+    auto replacement = std::make_unique<index_type>(*res_ptr,
+                                                    index_ptr->metric(),
+                                                    index_ptr->n_lists(),
+                                                    index_ptr->dim(),
+                                                    index_ptr->conservative_memory_allocation());
+    ivf_sq_copy_trained_state(*res_ptr, replacement.get(), index_ptr);
+    delete index_ptr;
+    index->addr = reinterpret_cast<uintptr_t>(replacement.release());
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfSqBuildFromCenters(cuvsResources_t res,
+                                                 cuvsIvfSqIndexParams_t params,
+                                                 DLDataType index_dtype,
+                                                 DLManagedTensor* centers,
+                                                 DLManagedTensor* center_norms,
+                                                 DLManagedTensor* vmin,
+                                                 DLManagedTensor* delta,
+                                                 cuvsIvfSqIndex_t index)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr == 0, "output index handle must be empty");
+    RAFT_EXPECTS(index_dtype.code == kDLFloat && (index_dtype.bits == 32 || index_dtype.bits == 16),
+                 "IVF-SQ index dtype must be float32 or float16");
+    auto* res_ptr     = reinterpret_cast<raft::resources*>(res);
+    using matrix_type = raft::device_matrix_view<const float, uint32_t, raft::row_major>;
+    using vector_type = raft::device_vector_view<const float, uint32_t>;
+    auto centers_view = cuvs::core::from_dlpack<matrix_type>(centers);
+    auto vmin_view    = cuvs::core::from_dlpack<vector_type>(vmin);
+    auto delta_view   = cuvs::core::from_dlpack<vector_type>(delta);
+    RAFT_EXPECTS(centers_view.extent(0) == params->n_lists, "centers row count must equal n_lists");
+    RAFT_EXPECTS(vmin_view.extent(0) == centers_view.extent(1), "vmin dimensionality mismatch");
+    RAFT_EXPECTS(delta_view.extent(0) == centers_view.extent(1), "delta dimensionality mismatch");
+
+    auto build_params = cuvs::neighbors::ivf_sq::index_params{};
+    cuvs::neighbors::ivf_sq::convert_c_index_params(*params, &build_params);
+    auto replacement = std::make_unique<index_type>(*res_ptr, build_params, centers_view.extent(1));
+    raft::copy(*res_ptr, replacement->centers(), centers_view);
+    raft::copy(*res_ptr, replacement->sq_vmin(), vmin_view);
+    raft::copy(*res_ptr, replacement->sq_delta(), delta_view);
+    if (center_norms != nullptr) {
+      auto norms_view = cuvs::core::from_dlpack<vector_type>(center_norms);
+      RAFT_EXPECTS(norms_view.extent(0) == params->n_lists,
+                   "center_norms length must equal n_lists");
+      replacement->allocate_center_norms(*res_ptr);
+      RAFT_EXPECTS(replacement->center_norms().has_value(),
+                   "center norms are not supported for the configured metric");
+      raft::copy(*res_ptr, replacement->center_norms().value(), norms_view);
+    }
+    index->dtype = index_dtype;
+    index->addr  = reinterpret_cast<uintptr_t>(replacement.release());
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfSqIndexExtendList(cuvsResources_t res,
+                                                cuvsIvfSqIndex_t index,
+                                                DLManagedTensor* new_codes,
+                                                DLManagedTensor* new_indices,
+                                                uint32_t label)
+{
+  return cuvs::core::translate_exceptions(
+    [=] { ivf_sq_extend_list(res, index, new_codes, new_indices, label); });
 }

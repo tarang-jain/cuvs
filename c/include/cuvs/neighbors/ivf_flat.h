@@ -156,6 +156,9 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexCreate(cuvsIvfFlatIndex_t* index);
  */
 CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexDestroy(cuvsIvfFlatIndex_t index);
 
+/** Remove all vectors while preserving the trained IVF-Flat state. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexReset(cuvsResources_t res, cuvsIvfFlatIndex_t index);
+
 /**
  * @brief Get the number of clusters/inverted lists in the index
  *
@@ -174,6 +177,9 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetNLists(cuvsIvfFlatIndex_t index, int6
  */
 CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetDim(cuvsIvfFlatIndex_t index, int64_t* dim);
 
+/** Get the total number of vectors in the index. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetSize(cuvsIvfFlatIndex_t index, int64_t* size);
+
 /**
  * @brief Get the cluster centers corresponding to the lists [n_lists, dim]
  *
@@ -182,6 +188,23 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetDim(cuvsIvfFlatIndex_t index, int64_t
  * @return cuvsError_t
  */
 CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetCenters(cuvsIvfFlatIndex_t index, DLManagedTensor* centers);
+
+/** Get a non-owning device view of the list sizes [n_lists]. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetListSizes(cuvsIvfFlatIndex_t index,
+                                                     DLManagedTensor* list_sizes);
+
+/** Get a non-owning device view of the vector indices in one list. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetListIndices(cuvsIvfFlatIndex_t index,
+                                                       uint32_t label,
+                                                       DLManagedTensor* out_indices);
+
+/** Unpack list vectors into a caller-allocated contiguous device matrix
+ * [n_rows, dim]. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexUnpackContiguousListData(cuvsResources_t res,
+                                                                 cuvsIvfFlatIndex_t index,
+                                                                 DLManagedTensor* out_vectors,
+                                                                 uint32_t label,
+                                                                 uint32_t offset);
 
 /**
  * @}
@@ -234,9 +257,21 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetCenters(cuvsIvfFlatIndex_t index, DLM
  * @return cuvsError_t
  */
 CUVS_EXPORT cuvsError_t cuvsIvfFlatBuild(cuvsResources_t res,
-                             cuvsIvfFlatIndexParams_t index_params,
-                             DLManagedTensor* dataset,
-                             cuvsIvfFlatIndex_t index);
+                                         cuvsIvfFlatIndexParams_t index_params,
+                                         DLManagedTensor* dataset,
+                                         cuvsIvfFlatIndex_t index);
+
+/**
+ * Build an empty IVF-Flat index from caller-provided coarse centers and
+ * optional center norms. The index dtype describes the vectors that will
+ * subsequently be added and searched.
+ */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatBuildFromCenters(cuvsResources_t res,
+                                                    cuvsIvfFlatIndexParams_t index_params,
+                                                    DLDataType index_dtype,
+                                                    DLManagedTensor* centers,
+                                                    DLManagedTensor* center_norms,
+                                                    cuvsIvfFlatIndex_t index);
 /**
  * @}
  */
@@ -363,6 +398,13 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatExtend(cuvsResources_t res,
                               DLManagedTensor* new_vectors,
                               DLManagedTensor* new_indices,
                               cuvsIvfFlatIndex_t index);
+
+/** Append already-assigned contiguous vectors and indices to one list. */
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexExtendList(cuvsResources_t res,
+                                                   cuvsIvfFlatIndex_t index,
+                                                   DLManagedTensor* new_vectors,
+                                                   DLManagedTensor* new_indices,
+                                                   uint32_t label);
 /**
  * @}
  */

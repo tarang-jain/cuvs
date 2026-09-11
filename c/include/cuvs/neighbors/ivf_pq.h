@@ -7,6 +7,7 @@
 
 #include <cuvs/core/c_api.h>
 #include <cuvs/distance/distance.h>
+#include <cuvs/neighbors/common.h>
 #include <dlpack/dlpack.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -268,6 +269,9 @@ CUVS_EXPORT cuvsError_t cuvsIvfPqIndexCreate(cuvsIvfPqIndex_t* index);
  * @param[in] index cuvsIvfPqIndex_t to de-allocate
  */
 CUVS_EXPORT cuvsError_t cuvsIvfPqIndexDestroy(cuvsIvfPqIndex_t index);
+
+/** Remove all vectors while preserving the trained IVF-PQ state. */
+CUVS_EXPORT cuvsError_t cuvsIvfPqIndexReset(cuvsResources_t res, cuvsIvfPqIndex_t index);
 
 /** Get the number of clusters/inverted lists */
 CUVS_EXPORT cuvsError_t cuvsIvfPqIndexGetNLists(cuvsIvfPqIndex_t index, int64_t* n_lists);
@@ -539,6 +543,15 @@ CUVS_EXPORT cuvsError_t cuvsIvfPqSearch(cuvsResources_t res,
                             DLManagedTensor* queries,
                             DLManagedTensor* neighbors,
                             DLManagedTensor* distances);
+
+/** Search an IVF-PQ index using an optional cuVS filter. */
+CUVS_EXPORT cuvsError_t cuvsIvfPqSearchWithFilter(cuvsResources_t res,
+                                                  cuvsIvfPqSearchParams_t search_params,
+                                                  cuvsIvfPqIndex_t index,
+                                                  DLManagedTensor* queries,
+                                                  DLManagedTensor* neighbors,
+                                                  DLManagedTensor* distances,
+                                                  cuvsFilter filter);
 /**
  * @}
  */
@@ -600,6 +613,13 @@ CUVS_EXPORT cuvsError_t cuvsIvfPqExtend(cuvsResources_t res,
                             DLManagedTensor* new_vectors,
                             DLManagedTensor* new_indices,
                             cuvsIvfPqIndex_t index);
+
+/** Append already-encoded contiguous PQ codes and indices to one list. */
+CUVS_EXPORT cuvsError_t cuvsIvfPqIndexExtendList(cuvsResources_t res,
+                                                 cuvsIvfPqIndex_t index,
+                                                 DLManagedTensor* new_codes,
+                                                 DLManagedTensor* new_indices,
+                                                 uint32_t label);
 /**
  * @}
  */

@@ -5,7 +5,10 @@
 
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/all_neighbors.h>
+#include <cuvs/neighbors/brute_force.h>
 #include <cuvs/neighbors/cagra.h>
+#include <cuvs/neighbors/ivf_flat.h>
+#include <cuvs/neighbors/ivf_pq.h>
 #include <cuvs/neighbors/ivf_sq.h>
 #include <cuvs/neighbors/tiered_index.h>
 
@@ -71,8 +74,58 @@ void test_compile_all_neighbors()
   cuvsAllNeighborsBuild(resources, params, &dataset, &indices, &distances, &core_distances, 1.0f);
 }
 
+void test_compile_faiss_extension_apis()
+{
+  assert(!"test_compile_faiss_extension_apis is not meant to be run");
+
+  cuvsResources_t resources = 0;
+  DLManagedTensor tensor;
+  DLDataType dtype  = {kDLFloat, 32, 1};
+  cuvsFilter filter = {0, NO_FILTER};
+
+  cuvsBruteForceIndex_t brute_force;
+  cuvsBruteForceBuildWithNorms(resources, &tensor, &tensor, L2Expanded, 0.0f, brute_force);
+
+  cuvsCagraIndexParams_t cagra_params;
+  cuvsCagraIndexParamsCreate(&cagra_params);
+  cagra_params->guarantee_connectivity = true;
+  cuvsCagraOptimizeGraph(resources, &tensor, &tensor, true);
+
+  cuvsAllNeighborsIndexParams_t all_neighbors_params;
+  cuvsAllNeighborsIndexParamsCreate(&all_neighbors_params);
+  all_neighbors_params->ivf_pq_search_params   = NULL;
+  all_neighbors_params->ivf_pq_refinement_rate = 1.0f;
+  all_neighbors_params->ivf_pq_sizing_rows     = 0;
+
+  cuvsIvfFlatIndex_t flat;
+  int64_t size;
+  cuvsIvfFlatIndexReset(resources, flat);
+  cuvsIvfFlatIndexGetSize(flat, &size);
+  cuvsIvfFlatIndexGetListSizes(flat, &tensor);
+  cuvsIvfFlatIndexGetListIndices(flat, 0, &tensor);
+  cuvsIvfFlatIndexUnpackContiguousListData(resources, flat, &tensor, 0, 0);
+  cuvsIvfFlatBuildFromCenters(resources, NULL, dtype, &tensor, &tensor, flat);
+  cuvsIvfFlatIndexExtendList(resources, flat, &tensor, &tensor, 0);
+
+  cuvsIvfPqIndex_t pq;
+  cuvsIvfPqIndexReset(resources, pq);
+  cuvsIvfPqSearchWithFilter(resources, NULL, pq, &tensor, &tensor, &tensor, filter);
+  cuvsIvfPqIndexExtendList(resources, pq, &tensor, &tensor, 0);
+
+  cuvsIvfSqIndex_t sq;
+  cuvsIvfSqIndexReset(resources, sq);
+  cuvsIvfSqIndexGetListSizes(sq, &tensor);
+  cuvsIvfSqIndexGetListIndices(sq, 0, &tensor);
+  cuvsIvfSqIndexUnpackContiguousListData(resources, sq, &tensor, 0, 0);
+  cuvsIvfSqIndexGetVMin(sq, &tensor);
+  cuvsIvfSqIndexGetDelta(sq, &tensor);
+  cuvsIvfSqBuildFromCenters(resources, NULL, dtype, &tensor, &tensor, &tensor, &tensor, sq);
+  cuvsIvfSqIndexExtendList(resources, sq, &tensor, &tensor, 0);
+}
+
 int main()
 {
+  if (getenv("CUVS_RUN_COMPILE_ONLY_API_CALLS") != NULL) { test_compile_faiss_extension_apis(); }
   // These are smoke tests that check that the C-APIs compile with a C compiler.
   // These are not meant to be run.
   test_compile_cagra();

@@ -96,6 +96,17 @@ CUVS_EXPORT cuvsError_t cuvsBruteForceBuild(cuvsResources_t res,
                                 cuvsDistanceType metric,
                                 float metric_arg,
                                 cuvsBruteForceIndex_t index);
+
+/**
+ * Build a brute-force index using caller-provided precomputed dataset norms.
+ * The index stores non-owning views of both tensors.
+ */
+CUVS_EXPORT cuvsError_t cuvsBruteForceBuildWithNorms(cuvsResources_t res,
+                                                     DLManagedTensor* dataset,
+                                                     DLManagedTensor* norms,
+                                                     cuvsDistanceType metric,
+                                                     float metric_arg,
+                                                     cuvsBruteForceIndex_t index);
 /**
  * @}
  */

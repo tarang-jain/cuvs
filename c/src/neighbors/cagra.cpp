@@ -6,37 +6,35 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <dlpack/dlpack.h>
+#include <fstream>
 #include <memory>
 #include <type_traits>
 #include <variant>
 #include <vector>
+
+#include <dlpack/dlpack.h>
 
 #include <raft/core/copy.hpp>
 #include <raft/core/error.hpp>
 #include <raft/core/mdspan_types.hpp>
 #include <raft/core/numpy_serializer.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
-#include <raft/core/numpy_serializer.hpp>
 #include <raft/core/resources.hpp>
 #include <raft/core/serialize.hpp>
 
-#include "../core/exceptions.hpp"
-#include "../core/interop.hpp"
 #include <cuvs/core/c_api.h>
 #include <cuvs/distance/distance.h>
 #include <cuvs/distance/distance.hpp>
 #include <cuvs/neighbors/cagra.h>
 #include <cuvs/neighbors/cagra.hpp>
 #include <cuvs/neighbors/common.h>
-#include <cuvs/neighbors/cagra.hpp>
+
+#include "../../../cpp/src/neighbors/detail/cagra/graph_shared.cuh"
 #include "../core/exceptions.hpp"
 #include "../core/interop.hpp"
 
 #include "c_api_box.hpp"
 #include "cagra.hpp"
-#include "c_api_box.hpp"
-#include <fstream>
 
 namespace {
 
@@ -585,6 +583,9 @@ static void _set_graph_build_params(
         auto ivf_params = static_cast<cuvsIvfPqParams*>(params.graph_build_params);
         if (ivf_params->ivf_pq_build_params) {
           auto bp                                         = ivf_params->ivf_pq_build_params;
+          pq_params.build_params.metric =
+            static_cast<cuvs::distance::DistanceType>((int)bp->metric);
+          pq_params.build_params.metric_arg               = bp->metric_arg;
           pq_params.build_params.add_data_on_build        = bp->add_data_on_build;
           pq_params.build_params.n_lists                  = bp->n_lists;
           pq_params.build_params.kmeans_n_iters           = bp->kmeans_n_iters;
@@ -597,6 +598,8 @@ static void _set_graph_build_params(
           pq_params.build_params.conservative_memory_allocation =
             bp->conservative_memory_allocation;
           pq_params.build_params.max_train_points_per_pq_code = bp->max_train_points_per_pq_code;
+          pq_params.build_params.codes_layout =
+            static_cast<cuvs::neighbors::ivf_pq::list_layout>((int)bp->codes_layout);
         }
         if (ivf_params->ivf_pq_search_params) {
           auto sp                                          = ivf_params->ivf_pq_search_params;
@@ -604,6 +607,8 @@ static void _set_graph_build_params(
           pq_params.search_params.lut_dtype                = sp->lut_dtype;
           pq_params.search_params.internal_distance_dtype  = sp->internal_distance_dtype;
           pq_params.search_params.preferred_shmem_carveout = sp->preferred_shmem_carveout;
+          pq_params.search_params.coarse_search_dtype      = sp->coarse_search_dtype;
+          pq_params.search_params.max_internal_batch_size  = sp->max_internal_batch_size;
         }
         if (ivf_params->refinement_rate > 1.0f) {
           pq_params.refinement_rate = ivf_params->refinement_rate;
@@ -1252,6 +1257,7 @@ void convert_c_index_params(cuvsCagraIndexParams params,
   out->metric                    = static_cast<cuvs::distance::DistanceType>((int)params.metric);
   out->intermediate_graph_degree = params.intermediate_graph_degree;
   out->graph_degree              = params.graph_degree;
+  out->guarantee_connectivity    = params.guarantee_connectivity;
   _set_graph_build_params(out->graph_build_params, params, params.build_algo, n_rows, dim);
 
 }
@@ -1923,7 +1929,9 @@ extern "C" cuvsError_t cuvsCagraIndexParamsCreate(cuvsCagraIndexParams_t* params
                                                              .intermediate_graph_degree = 128,
                                                              .graph_degree              = 64,
                                                              .build_algo                = IVF_PQ,
-                                                             .nn_descent_niter          = 20};
+                                                             .nn_descent_niter          = 20,
+                                                             .graph_build_params        = nullptr,
+                                                             .guarantee_connectivity    = false};
     (*params)->graph_build_params = new cuvsIvfPqParams{nullptr, nullptr, 1};
   });
 }
@@ -2179,5 +2187,29 @@ extern "C" cuvsError_t cuvsCagraSerializeToHnswlib(cuvsResources_t res,
     } else {
       RAFT_FAIL("Unsupported index dtype: %d and bits: %d", index->dtype.code, index->dtype.bits);
     }
+  });
+}
+
+extern "C" cuvsError_t cuvsCagraOptimizeGraph(cuvsResources_t res,
+                                              DLManagedTensor* knn_graph,
+                                              DLManagedTensor* output_graph,
+                                              bool guarantee_connectivity)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(knn_graph != nullptr && output_graph != nullptr, "graph tensors cannot be null");
+    auto input_dtype  = knn_graph->dl_tensor.dtype;
+    auto output_dtype = output_graph->dl_tensor.dtype;
+    RAFT_EXPECTS(input_dtype.code == kDLUInt && input_dtype.bits == 32,
+                 "input graph must have uint32 dtype");
+    RAFT_EXPECTS(output_dtype.code == kDLUInt && output_dtype.bits == 32,
+                 "output graph must have uint32 dtype");
+    using input_type = raft::device_matrix_view<uint32_t, int64_t, raft::row_major>;
+    auto input       = cuvs::core::from_dlpack<input_type>(knn_graph);
+    auto output      = cuvs::core::from_dlpack<input_type>(output_graph);
+    RAFT_EXPECTS(input.extent(0) == output.extent(0), "graph row counts must match");
+    RAFT_EXPECTS(output.extent(1) <= input.extent(1),
+                 "output graph degree cannot exceed input graph degree");
+    cuvs::neighbors::cagra::detail::graph::optimize_device_graph(
+      *reinterpret_cast<raft::resources*>(res), input, output, guarantee_connectivity);
   });
 }

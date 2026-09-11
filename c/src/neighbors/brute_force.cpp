@@ -18,8 +18,8 @@
 #include <cuvs/distance/distance.h>
 #include <cuvs/distance/distance.hpp>
 #include <cuvs/neighbors/brute_force.h>
-#include <cuvs/neighbors/common.h>
 #include <cuvs/neighbors/brute_force.hpp>
+#include <cuvs/neighbors/common.h>
 
 #include "../core/exceptions.hpp"
 #include "../core/interop.hpp"
@@ -271,6 +271,80 @@ extern "C" cuvsError_t cuvsBruteForceSerialize(cuvsResources_t res,
       _serialize<half>(res, filename, *index);
     } else {
       RAFT_FAIL("Unsupported index dtype: %d and bits: %d", index->dtype.code, index->dtype.bits);
+    }
+  });
+}
+
+namespace {
+
+template <typename T, typename LayoutT>
+void* brute_force_build_with_norms(cuvsResources_t res,
+                                   DLManagedTensor* dataset_tensor,
+                                   DLManagedTensor* norms_tensor,
+                                   cuvsDistanceType metric,
+                                   float metric_arg)
+{
+  using dataset_type = raft::device_matrix_view<const T, int64_t, LayoutT>;
+  using norms_type   = raft::device_vector_view<const float, int64_t>;
+  auto dataset       = cuvs::core::from_dlpack<dataset_type>(dataset_tensor);
+  auto norms         = cuvs::core::from_dlpack<norms_type>(norms_tensor);
+  RAFT_EXPECTS(norms.extent(0) == dataset.extent(0),
+               "norms length must equal the number of dataset rows");
+  auto* res_ptr = reinterpret_cast<raft::resources*>(res);
+  return new cuvs::neighbors::brute_force::index<T, float>(
+    *res_ptr,
+    dataset,
+    std::make_optional(norms),
+    static_cast<cuvs::distance::DistanceType>((int)metric),
+    metric_arg);
+}
+
+}  // namespace
+
+extern "C" cuvsError_t cuvsBruteForceBuildWithNorms(cuvsResources_t res,
+                                                    DLManagedTensor* dataset,
+                                                    DLManagedTensor* norms,
+                                                    cuvsDistanceType metric,
+                                                    float metric_arg,
+                                                    cuvsBruteForceIndex_t index)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr == 0, "output index handle must be empty");
+    RAFT_EXPECTS(cuvs::core::is_dlpack_device_compatible(dataset->dl_tensor),
+                 "dataset must use device-compatible memory");
+    RAFT_EXPECTS(cuvs::core::is_dlpack_device_compatible(norms->dl_tensor),
+                 "norms must use device-compatible memory");
+    RAFT_EXPECTS(norms->dl_tensor.dtype.code == kDLFloat && norms->dl_tensor.dtype.bits == 32,
+                 "norms must have float32 dtype");
+
+    auto dtype   = dataset->dl_tensor.dtype;
+    index->dtype = dtype;
+    if (dtype.code == kDLFloat && dtype.bits == 32) {
+      if (cuvs::core::is_c_contiguous(dataset)) {
+        index->addr =
+          reinterpret_cast<uintptr_t>(brute_force_build_with_norms<float, raft::row_major>(
+            res, dataset, norms, metric, metric_arg));
+      } else if (cuvs::core::is_f_contiguous(dataset)) {
+        index->addr =
+          reinterpret_cast<uintptr_t>(brute_force_build_with_norms<float, raft::col_major>(
+            res, dataset, norms, metric, metric_arg));
+      } else {
+        RAFT_FAIL("dataset must be contiguous");
+      }
+    } else if (dtype.code == kDLFloat && dtype.bits == 16) {
+      if (cuvs::core::is_c_contiguous(dataset)) {
+        index->addr =
+          reinterpret_cast<uintptr_t>(brute_force_build_with_norms<half, raft::row_major>(
+            res, dataset, norms, metric, metric_arg));
+      } else if (cuvs::core::is_f_contiguous(dataset)) {
+        index->addr =
+          reinterpret_cast<uintptr_t>(brute_force_build_with_norms<half, raft::col_major>(
+            res, dataset, norms, metric, metric_arg));
+      } else {
+        RAFT_FAIL("dataset must be contiguous");
+      }
+    } else {
+      RAFT_FAIL("Unsupported dataset dtype: %d and bits: %d", dtype.code, dtype.bits);
     }
   });
 }

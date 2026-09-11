@@ -222,9 +222,30 @@ struct cuvsCagraIndexParams {
    * - Others: nullptr
    */
   void* graph_build_params;
+  /** Whether to use MST optimization to guarantee graph connectivity. */
+  bool guarantee_connectivity;
 };
 
 typedef struct cuvsCagraIndexParams* cuvsCagraIndexParams_t;
+
+/**
+ * @brief Optimize a device-resident k-NN graph into a CAGRA graph.
+ *
+ * Both tensors must contain row-major uint32 data in CUDA-accessible memory,
+ * have the same number of rows, and the output degree must not exceed the
+ * input degree.
+ *
+ * @param[in] res cuvsResources_t opaque C handle
+ * @param[in] knn_graph Input k-NN graph [n_rows, input_degree]
+ * @param[out] output_graph Optimized CAGRA graph [n_rows, output_degree]
+ * @param[in] guarantee_connectivity Whether to add MST edges to guarantee
+ * connectivity
+ * @return cuvsError_t
+ */
+CUVS_EXPORT cuvsError_t cuvsCagraOptimizeGraph(cuvsResources_t res,
+                                               DLManagedTensor* knn_graph,
+                                               DLManagedTensor* output_graph,
+                                               bool guarantee_connectivity);
 
 /** Algorithm used to merge physical CAGRA indices. */
 enum cuvsCagraMergeAlgo {

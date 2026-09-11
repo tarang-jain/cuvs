@@ -631,3 +631,99 @@ extern "C" cuvsError_t cuvsIvfPqTransform(cuvsResources_t res,
       }
     });
 }
+
+namespace {
+
+template <typename T>
+void ivf_pq_search_with_filter(cuvsResources_t res,
+                               cuvsIvfPqSearchParams_t params,
+                               cuvsIvfPqIndex_t index,
+                               DLManagedTensor* queries_tensor,
+                               DLManagedTensor* neighbors_tensor,
+                               DLManagedTensor* distances_tensor,
+                               cuvsFilter filter)
+{
+  auto* res_ptr      = reinterpret_cast<raft::resources*>(res);
+  auto* index_ptr    = reinterpret_cast<cuvs::neighbors::ivf_pq::index<int64_t>*>(index->addr);
+  auto search_params = cuvs::neighbors::ivf_pq::search_params{};
+  cuvs::neighbors::ivf_pq::convert_c_search_params(*params, &search_params);
+
+  using queries_type   = raft::device_matrix_view<const T, int64_t, raft::row_major>;
+  using neighbors_type = raft::device_matrix_view<int64_t, int64_t, raft::row_major>;
+  using distances_type = raft::device_matrix_view<float, int64_t, raft::row_major>;
+  auto queries         = cuvs::core::from_dlpack<queries_type>(queries_tensor);
+  auto neighbors       = cuvs::core::from_dlpack<neighbors_type>(neighbors_tensor);
+  auto distances       = cuvs::core::from_dlpack<distances_type>(distances_tensor);
+
+  if (filter.type == NO_FILTER) {
+    cuvs::neighbors::ivf_pq::search(
+      *res_ptr, search_params, *index_ptr, queries, neighbors, distances);
+  } else if (filter.type == BITSET) {
+    using filter_type   = raft::device_vector_view<std::uint32_t, int64_t, raft::row_major>;
+    auto* filter_tensor = reinterpret_cast<DLManagedTensor*>(filter.addr);
+    auto removed        = cuvs::core::from_dlpack<filter_type>(filter_tensor);
+    auto bitset = cuvs::core::bitset_view<std::uint32_t, int64_t>(removed, index_ptr->size());
+    auto bitset_filter = cuvs::neighbors::filtering::bitset_filter(bitset);
+    cuvs::neighbors::ivf_pq::search(
+      *res_ptr, search_params, *index_ptr, queries, neighbors, distances, bitset_filter);
+  } else {
+    RAFT_FAIL("Unsupported filter type: BITMAP");
+  }
+}
+
+}  // namespace
+
+extern "C" cuvsError_t cuvsIvfPqIndexReset(cuvsResources_t res, cuvsIvfPqIndex_t index)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-PQ index must be built");
+    auto* index_ptr = reinterpret_cast<cuvs::neighbors::ivf_pq::index<int64_t>*>(index->addr);
+    cuvs::neighbors::ivf_pq::helpers::reset_index(*reinterpret_cast<raft::resources*>(res),
+                                                  index_ptr);
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfPqSearchWithFilter(cuvsResources_t res,
+                                                 cuvsIvfPqSearchParams_t params,
+                                                 cuvsIvfPqIndex_t index,
+                                                 DLManagedTensor* queries,
+                                                 DLManagedTensor* neighbors,
+                                                 DLManagedTensor* distances,
+                                                 cuvsFilter filter)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-PQ index must be built");
+    auto dtype = queries->dl_tensor.dtype;
+    if (dtype.code == kDLFloat && dtype.bits == 32) {
+      ivf_pq_search_with_filter<float>(res, params, index, queries, neighbors, distances, filter);
+    } else if (dtype.code == kDLFloat && dtype.bits == 16) {
+      ivf_pq_search_with_filter<half>(res, params, index, queries, neighbors, distances, filter);
+    } else if (dtype.code == kDLInt && dtype.bits == 8) {
+      ivf_pq_search_with_filter<int8_t>(res, params, index, queries, neighbors, distances, filter);
+    } else if (dtype.code == kDLUInt && dtype.bits == 8) {
+      ivf_pq_search_with_filter<uint8_t>(res, params, index, queries, neighbors, distances, filter);
+    } else {
+      RAFT_FAIL("Unsupported queries dtype: %d and bits: %d", dtype.code, dtype.bits);
+    }
+  });
+}
+
+extern "C" cuvsError_t cuvsIvfPqIndexExtendList(cuvsResources_t res,
+                                                cuvsIvfPqIndex_t index,
+                                                DLManagedTensor* new_codes,
+                                                DLManagedTensor* new_indices,
+                                                uint32_t label)
+{
+  return cuvs::core::translate_exceptions([=] {
+    RAFT_EXPECTS(index != nullptr && index->addr != 0, "IVF-PQ index must be built");
+    auto* index_ptr    = reinterpret_cast<cuvs::neighbors::ivf_pq::index<int64_t>*>(index->addr);
+    using codes_type   = raft::device_matrix_view<const uint8_t, uint32_t, raft::row_major>;
+    using indices_type = raft::device_vector_view<const int64_t, uint32_t>;
+    auto codes         = cuvs::core::from_dlpack<codes_type>(new_codes);
+    auto indices       = cuvs::core::from_dlpack<indices_type>(new_indices);
+    RAFT_EXPECTS(codes.extent(0) == indices.extent(0), "codes and indices length mismatch");
+    RAFT_EXPECTS(label < index_ptr->n_lists(), "list label is out of range");
+    cuvs::neighbors::ivf_pq::helpers::codepacker::extend_list_with_contiguous_codes(
+      *reinterpret_cast<raft::resources*>(res), index_ptr, codes, indices, label);
+  });
+}

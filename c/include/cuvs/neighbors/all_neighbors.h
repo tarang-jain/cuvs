@@ -59,6 +59,10 @@ struct cuvsAllNeighborsIndexParams {
   // Algorithm-specific parameters (only one should be set based on algo)
   cuvsIvfPqIndexParams_t ivf_pq_params;          ///< Parameters for IVF-PQ algorithm (when algo ==
                                                  ///< CUVS_ALL_NEIGHBORS_ALGO_IVF_PQ)
+  cuvsIvfPqSearchParams_t ivf_pq_search_params;  ///< IVF-PQ search parameters
+  float ivf_pq_refinement_rate;                  ///< IVF-PQ refinement rate
+  int64_t ivf_pq_sizing_rows;                    ///< Rows used to derive IVF-PQ defaults; 0 uses
+                                                 ///< all rows
   cuvsNNDescentIndexParams_t nn_descent_params;  ///< Parameters for NN-Descent algorithm (when algo
                                                  ///< == CUVS_ALL_NEIGHBORS_ALGO_NN_DESCENT)
 };
