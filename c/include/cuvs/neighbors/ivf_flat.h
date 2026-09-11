@@ -200,7 +200,7 @@ CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexGetListIndices(cuvsIvfFlatIndex_t index,
 
 /** Unpack list vectors into a caller-allocated contiguous device matrix
  * [n_rows, dim]. */
-CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexUnpackContiguousListData(cuvsResources_t res,
+CUVS_EXPORT cuvsError_t cuvsIvfFlatIndexUnpackListData(cuvsResources_t res,
                                                                  cuvsIvfFlatIndex_t index,
                                                                  DLManagedTensor* out_vectors,
                                                                  uint32_t label,

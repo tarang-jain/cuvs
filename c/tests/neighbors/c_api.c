@@ -103,7 +103,7 @@ void test_compile_faiss_extension_apis()
   cuvsIvfFlatIndexGetSize(flat, &size);
   cuvsIvfFlatIndexGetListSizes(flat, &tensor);
   cuvsIvfFlatIndexGetListIndices(flat, 0, &tensor);
-  cuvsIvfFlatIndexUnpackContiguousListData(resources, flat, &tensor, 0, 0);
+  cuvsIvfFlatIndexUnpackListData(resources, flat, &tensor, 0, 0);
   cuvsIvfFlatBuildFromCenters(resources, NULL, dtype, &tensor, &tensor, flat);
   cuvsIvfFlatIndexExtendList(resources, flat, &tensor, &tensor, 0);
 
@@ -116,7 +116,7 @@ void test_compile_faiss_extension_apis()
   cuvsIvfSqIndexReset(resources, sq);
   cuvsIvfSqIndexGetListSizes(sq, &tensor);
   cuvsIvfSqIndexGetListIndices(sq, 0, &tensor);
-  cuvsIvfSqIndexUnpackContiguousListData(resources, sq, &tensor, 0, 0);
+  cuvsIvfSqIndexUnpackListData(resources, sq, &tensor, 0, 0);
   cuvsIvfSqIndexGetVMin(sq, &tensor);
   cuvsIvfSqIndexGetDelta(sq, &tensor);
   cuvsIvfSqBuildFromCenters(resources, NULL, dtype, &tensor, &tensor, &tensor, &tensor, sq);

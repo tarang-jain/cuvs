@@ -404,7 +404,7 @@ extern "C" cuvsError_t cuvsIvfSqIndexGetListIndices(cuvsIvfSqIndex_t index,
     cuvs::core::to_dlpack(index_ptr->lists()[label]->indices.view(), out_indices);
   });
 }
-extern "C" cuvsError_t cuvsIvfSqIndexUnpackContiguousListData(cuvsResources_t res,
+extern "C" cuvsError_t cuvsIvfSqIndexUnpackListData(cuvsResources_t res,
                                                               cuvsIvfSqIndex_t index,
                                                               DLManagedTensor* out_codes,
                                                               uint32_t label,

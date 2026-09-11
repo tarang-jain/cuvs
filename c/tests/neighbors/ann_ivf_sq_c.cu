@@ -222,7 +222,7 @@ TEST(IvfSqC, ExtendAndUnpackOddDimension)
                                       index),
             CUVS_SUCCESS);
   ASSERT_EQ(cuvsIvfSqIndexExtendList(res, index, &codes_tensor, &ids_tensor, 0), CUVS_SUCCESS);
-  ASSERT_EQ(cuvsIvfSqIndexUnpackContiguousListData(res, index, &output_tensor, 0, 0), CUVS_SUCCESS);
+  ASSERT_EQ(cuvsIvfSqIndexUnpackListData(res, index, &output_tensor, 0, 0), CUVS_SUCCESS);
   ASSERT_EQ(cuvsStreamSync(res), CUVS_SUCCESS);
 
   std::vector<uint8_t> output_h(codes_h.size());

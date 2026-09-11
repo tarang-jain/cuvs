@@ -178,7 +178,7 @@ CUVS_EXPORT cuvsError_t cuvsIvfSqIndexGetListIndices(cuvsIvfSqIndex_t index,
 
 /** Unpack list codes into a caller-allocated contiguous uint8 device matrix
  * [n_rows, dim]. */
-CUVS_EXPORT cuvsError_t cuvsIvfSqIndexUnpackContiguousListData(cuvsResources_t res,
+CUVS_EXPORT cuvsError_t cuvsIvfSqIndexUnpackListData(cuvsResources_t res,
                                                                cuvsIvfSqIndex_t index,
                                                                DLManagedTensor* out_codes,
                                                                uint32_t label,

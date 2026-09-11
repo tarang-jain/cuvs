@@ -533,7 +533,7 @@ extern "C" cuvsError_t cuvsIvfFlatIndexGetListIndices(cuvsIvfFlatIndex_t index,
   });
 }
 
-extern "C" cuvsError_t cuvsIvfFlatIndexUnpackContiguousListData(cuvsResources_t res,
+extern "C" cuvsError_t cuvsIvfFlatIndexUnpackListData(cuvsResources_t res,
                                                                 cuvsIvfFlatIndex_t index,
                                                                 DLManagedTensor* out_vectors,
                                                                 uint32_t label,
