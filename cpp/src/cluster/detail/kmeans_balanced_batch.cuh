@@ -10,12 +10,16 @@
 #include "kmeans_common.cuh"
 
 #include <raft/core/copy.cuh>
+#include <raft/core/device_setter.hpp>
 #include <raft/core/mdarray.hpp>
 #include <raft/core/operators.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
+#include <raft/core/resource/device_id.hpp>
 #include <raft/linalg/map.cuh>
 #include <raft/linalg/norm.cuh>
+#include <raft/linalg/reduce_cols_by_key.cuh>
 #include <raft/linalg/reduce_rows_by_key.cuh>
+#include <raft/matrix/init.cuh>
 #include <raft/util/cudart_utils.hpp>
 #include <raft/util/integer_utils.hpp>
 
@@ -43,6 +47,9 @@ using label_type   = uint32_t;
 using counter_type = unsigned long long;
 using kvp_type     = raft::KeyValuePair<index_type, float>;
 
+// RAFT does not expose an event abstraction. These events are the narrow CUDA-runtime exception
+// needed to hand double-buffer slots between independent nonblocking streams without synchronizing
+// either stream and losing H2D/compute overlap.
 class cuda_event {
  public:
   cuda_event() { RAFT_CUDA_TRY(cudaEventCreateWithFlags(&event_, cudaEventDisableTiming)); }
@@ -59,49 +66,6 @@ class cuda_event {
  private:
   cudaEvent_t event_{};
 };
-
-RAFT_KERNEL accumulate_counts_kernel(const label_type* labels,
-                                     index_type n_rows,
-                                     counter_type* counts)
-{
-  auto row = static_cast<index_type>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (row < n_rows) { atomicAdd(counts + labels[row], counter_type{1}); }
-}
-
-RAFT_KERNEL finalize_centers_kernel(const float* sums,
-                                    const counter_type* counts,
-                                    const float* old_centers,
-                                    float* new_centers,
-                                    index_type n_clusters,
-                                    index_type dim)
-{
-  auto i = static_cast<index_type>(blockIdx.x) * blockDim.x + threadIdx.x;
-  auto n = n_clusters * dim;
-  if (i < n) {
-    auto cluster   = i / dim;
-    auto count     = counts[cluster];
-    new_centers[i] = count == 0 ? old_centers[i] : sums[i] / static_cast<float>(count);
-  }
-}
-
-RAFT_KERNEL adjust_centers_kernel(float* centers,
-                                  const float* donor_points,
-                                  const index_type* receivers,
-                                  const index_type* donors,
-                                  index_type n_pairs,
-                                  index_type dim,
-                                  float centroid_offset)
-{
-  auto pair = static_cast<index_type>(blockIdx.x);
-  if (pair >= n_pairs) return;
-  auto receiver = receivers[pair];
-  auto donor    = donors[pair];
-  for (index_type col = threadIdx.x; col < dim; col += blockDim.x) {
-    auto donor_center             = centers[donor * dim + col];
-    auto donor_point              = donor_points[pair * dim + col];
-    centers[receiver * dim + col] = donor_center + centroid_offset * (donor_point - donor_center);
-  }
-}
 
 struct prediction_scratch {
   prediction_scratch(const raft::resources& handle, index_type batch_rows)
@@ -179,15 +143,11 @@ inline void compute_norms(const raft::resources& handle,
       raft::make_device_matrix_view<const float, index_type>(batch.data(), n_rows, X.extent(1));
     auto norms = raft::make_device_vector_view<float, index_type>(device_norms.data(), n_rows);
     raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(handle, data, norms);
-    RAFT_CUDA_TRY(cudaMemcpyAsync(host_norms + batch.offset(),
-                                  device_norms.data(),
-                                  batch.size() * sizeof(float),
-                                  cudaMemcpyDeviceToHost,
-                                  stream.get()));
+    raft::update_host(host_norms + batch.offset(), device_norms.data(), batch.size(), stream);
     batches.prefetch_next_batch();
   }
   raft::resource::sync_stream(handle, stream);
-  copy_stream.synchronize();
+  raft::resource::sync_stream(handle, copy_stream.view());
 }
 
 struct adjustment_scratch {
@@ -197,15 +157,17 @@ struct adjustment_scratch {
       receivers(static_cast<size_t>(n_clusters / 2)),
       donors(static_cast<size_t>(n_clusters / 2)),
       donor_rows(static_cast<size_t>(n_clusters / 2)),
+      donor_by_receiver(static_cast<size_t>(n_clusters), index_type{-1}),
+      point_by_receiver(static_cast<size_t>(n_clusters), index_type{-1}),
       device_points((n_clusters / 2) * dim,
                     raft::resource::get_cuda_stream(handle),
                     raft::resource::get_workspace_resource_ref(handle)),
-      device_receivers(n_clusters / 2,
-                       raft::resource::get_cuda_stream(handle),
-                       raft::resource::get_workspace_resource_ref(handle)),
-      device_donors(n_clusters / 2,
-                    raft::resource::get_cuda_stream(handle),
-                    raft::resource::get_workspace_resource_ref(handle))
+      device_donor_by_receiver(n_clusters,
+                               raft::resource::get_cuda_stream(handle),
+                               raft::resource::get_workspace_resource_ref(handle)),
+      device_point_by_receiver(n_clusters,
+                               raft::resource::get_cuda_stream(handle),
+                               raft::resource::get_workspace_resource_ref(handle))
   {
   }
 
@@ -214,9 +176,11 @@ struct adjustment_scratch {
   std::vector<index_type> receivers;
   std::vector<index_type> donors;
   std::vector<index_type> donor_rows;
+  std::vector<index_type> donor_by_receiver;
+  std::vector<index_type> point_by_receiver;
   rmm::device_uvector<float> device_points;
-  rmm::device_uvector<index_type> device_receivers;
-  rmm::device_uvector<index_type> device_donors;
+  rmm::device_uvector<index_type> device_donor_by_receiver;
+  rmm::device_uvector<index_type> device_point_by_receiver;
 };
 
 inline auto adjust_centers(const raft::resources& handle,
@@ -285,17 +249,39 @@ inline auto adjust_centers(const raft::resources& handle,
   auto stream = raft::resource::get_cuda_stream(handle);
   raft::update_device(
     scratch.device_points.data(), scratch.host_points.data_handle(), n_pairs * dim, stream);
-  raft::update_device(scratch.device_receivers.data(), scratch.receivers.data(), n_pairs, stream);
-  raft::update_device(scratch.device_donors.data(), scratch.donors.data(), n_pairs, stream);
-  adjust_centers_kernel<<<static_cast<unsigned>(n_pairs), 256, 0, stream.get()>>>(
-    centers,
-    scratch.device_points.data(),
-    scratch.device_receivers.data(),
-    scratch.device_donors.data(),
-    n_pairs,
-    dim,
-    params.centroid_offset);
-  RAFT_CUDA_TRY(cudaPeekAtLastError());
+  std::fill(scratch.donor_by_receiver.begin(), scratch.donor_by_receiver.end(), index_type{-1});
+  std::fill(scratch.point_by_receiver.begin(), scratch.point_by_receiver.end(), index_type{-1});
+  for (index_type pair = 0; pair < n_pairs; ++pair) {
+    auto receiver                       = scratch.receivers[pair];
+    scratch.donor_by_receiver[receiver] = scratch.donors[pair];
+    scratch.point_by_receiver[receiver] = pair;
+  }
+  raft::update_device(
+    scratch.device_donor_by_receiver.data(), scratch.donor_by_receiver.data(), n_clusters, stream);
+  raft::update_device(
+    scratch.device_point_by_receiver.data(), scratch.point_by_receiver.data(), n_clusters, stream);
+
+  auto centers_view = raft::make_device_vector_view<float, index_type>(centers, n_clusters * dim);
+  raft::linalg::map_offset(
+    handle,
+    centers_view,
+    [centers,
+     donor_points      = scratch.device_points.data(),
+     donor_by_receiver = scratch.device_donor_by_receiver.data(),
+     point_by_receiver = scratch.device_point_by_receiver.data(),
+     dim,
+     centroid_offset = params.centroid_offset] __device__(auto i, float center) {
+      auto offset   = static_cast<index_type>(i);
+      auto receiver = offset / dim;
+      auto donor    = donor_by_receiver[receiver];
+      if (donor < 0) return center;
+      auto col          = offset % dim;
+      auto point        = point_by_receiver[receiver];
+      auto donor_center = centers[donor * dim + col];
+      auto donor_point  = donor_points[point * dim + col];
+      return donor_center + centroid_offset * (donor_point - donor_center);
+    },
+    raft::make_const_mdspan(centers_view));
   return true;
 }
 
@@ -325,16 +311,25 @@ inline void streamed_balanced_em(const raft::resources& handle,
   rmm::device_uvector<float> next_centers(center_elems, stream, mr);
   rmm::device_uvector<float> sums(center_elems, stream, mr);
   rmm::device_uvector<counter_type> counts(n_clusters, stream, mr);
+  rmm::device_uvector<counter_type> count_weights(rows_per_batch, stream, mr);
   auto pinned_sizes = raft::make_pinned_vector<counter_type, index_type>(handle, n_clusters);
+  raft::matrix::fill(
+    handle,
+    raft::make_device_vector_view<counter_type, index_type>(count_weights.data(), rows_per_batch),
+    counter_type{1});
 
   rmm::cuda_stream copy_stream(rmm::cuda_stream::flags::non_blocking);
   auto batches = cuvs::spatial::knn::detail::utils::batch_load_iterator(
     handle, X, rows_per_batch, copy_stream.view(), mr, true);
 
   auto reduce_dataset = [&](bool predict) {
-    RAFT_CUDA_TRY(cudaMemsetAsync(sums.data(), 0, sums.size() * sizeof(float), stream.get()));
-    RAFT_CUDA_TRY(
-      cudaMemsetAsync(counts.data(), 0, counts.size() * sizeof(counter_type), stream.get()));
+    raft::matrix::fill(handle,
+                       raft::make_device_vector_view<float, index_type>(sums.data(), center_elems),
+                       float{0});
+    raft::matrix::fill(
+      handle,
+      raft::make_device_vector_view<counter_type, index_type>(counts.data(), n_clusters),
+      counter_type{0});
 
     batches.reset();
     batches.prefetch_next_batch();
@@ -342,11 +337,7 @@ inline void streamed_balanced_em(const raft::resources& handle,
       auto current_rows = static_cast<index_type>(batch.size());
       auto offset       = static_cast<index_type>(batch.offset());
       if (predict) {
-        RAFT_CUDA_TRY(cudaMemcpyAsync(prediction.norms.data(),
-                                      host_norms + offset,
-                                      batch.size() * sizeof(float),
-                                      cudaMemcpyHostToDevice,
-                                      stream.get()));
+        raft::update_device(prediction.norms.data(), host_norms + offset, batch.size(), stream);
         predict_batch(handle,
                       params,
                       centers,
@@ -357,11 +348,7 @@ inline void streamed_balanced_em(const raft::resources& handle,
                       prediction.norms.data(),
                       prediction);
       } else {
-        RAFT_CUDA_TRY(cudaMemcpyAsync(prediction.labels.data(),
-                                      host_labels + offset,
-                                      batch.size() * sizeof(label_type),
-                                      cudaMemcpyHostToDevice,
-                                      stream.get()));
+        raft::update_device(prediction.labels.data(), host_labels + offset, batch.size(), stream);
       }
 
       raft::linalg::reduce_rows_by_key(batch.data(),
@@ -374,31 +361,35 @@ inline void streamed_balanced_em(const raft::resources& handle,
                                        sums.data(),
                                        stream.get(),
                                        false);
-      constexpr int block = 256;
-      auto grid           = static_cast<unsigned>((current_rows + block - 1) / block);
-      accumulate_counts_kernel<<<grid, block, 0, stream.get()>>>(
-        prediction.labels.data(), current_rows, counts.data());
-      RAFT_CUDA_TRY(cudaPeekAtLastError());
-      RAFT_CUDA_TRY(cudaMemcpyAsync(host_labels + offset,
-                                    prediction.labels.data(),
-                                    batch.size() * sizeof(label_type),
-                                    cudaMemcpyDeviceToHost,
-                                    stream.get()));
+      raft::linalg::reduce_cols_by_key(
+        handle,
+        raft::make_device_matrix_view<const counter_type, index_type>(
+          count_weights.data(), index_type{1}, current_rows),
+        raft::make_device_vector_view<const label_type, index_type>(prediction.labels.data(),
+                                                                    current_rows),
+        raft::make_device_matrix_view<counter_type, index_type>(
+          counts.data(), index_type{1}, n_clusters),
+        n_clusters,
+        false);
+      raft::update_host(host_labels + offset, prediction.labels.data(), batch.size(), stream);
       batches.prefetch_next_batch();
     }
 
-    constexpr int block = 256;
-    auto grid           = static_cast<unsigned>((center_elems + block - 1) / block);
-    finalize_centers_kernel<<<grid, block, 0, stream.get()>>>(
-      sums.data(), counts.data(), centers, next_centers.data(), n_clusters, dim);
-    RAFT_CUDA_TRY(cudaPeekAtLastError());
-    RAFT_CUDA_TRY(cudaMemcpyAsync(pinned_sizes.data_handle(),
-                                  counts.data(),
-                                  counts.size() * sizeof(counter_type),
-                                  cudaMemcpyDeviceToHost,
-                                  stream.get()));
+    auto next_centers_view =
+      raft::make_device_vector_view<float, index_type>(next_centers.data(), center_elems);
+    auto counts_ptr = counts.data();
+    raft::linalg::map_offset(
+      handle,
+      next_centers_view,
+      [counts_ptr, centers, dim] __device__(auto i, float sum) {
+        auto offset = static_cast<index_type>(i);
+        auto count  = counts_ptr[offset / dim];
+        return count == 0 ? centers[offset] : sum / static_cast<float>(count);
+      },
+      raft::make_device_vector_view<const float, index_type>(sums.data(), center_elems));
+    raft::update_host(pinned_sizes.data_handle(), counts.data(), counts.size(), stream);
     raft::resource::sync_stream(handle, stream);
-    copy_stream.synchronize();
+    raft::resource::sync_stream(handle, copy_stream.view());
     std::copy_n(pinned_sizes.data_handle(), n_clusters, host_sizes.begin());
   };
 
@@ -407,7 +398,8 @@ inline void streamed_balanced_em(const raft::resources& handle,
     for (index_type row = 0; row < n_rows; ++row) {
       host_labels[row] = static_cast<label_type>(row % n_clusters);
     }
-    RAFT_CUDA_TRY(cudaMemsetAsync(centers, 0, center_elems * sizeof(float), stream.get()));
+    raft::matrix::fill(
+      handle, raft::make_device_vector_view<float, index_type>(centers, center_elems), float{0});
     reduce_dataset(false);
     raft::copy(centers, next_centers.data(), center_elems, stream);
   }
@@ -502,14 +494,13 @@ inline auto build_fine_clusters(const raft::resources& handle,
     RAFT_CUDA_TRY(cudaEventRecord(consumed[slot].get(), stream.get()));
   }
 
-  int device = 0;
-  RAFT_CUDA_TRY(cudaGetDevice(&device));
+  auto device = raft::resource::get_device_id(handle);
   auto submit = [&](size_t sequence) {
-    return std::async(std::launch::async, [&, sequence] {
-      RAFT_CUDA_TRY(cudaSetDevice(device));
-      auto meso = work[sequence];
-      auto slot = static_cast<int>(sequence % slots);
-      auto rows = capped_sizes[meso];
+    return std::async(std::launch::async, [&, sequence, device] {
+      auto device_scope = raft::device_setter{device};
+      auto meso         = work[sequence];
+      auto slot         = static_cast<int>(sequence % slots);
+      auto rows         = capped_sizes[meso];
       if (sequence >= static_cast<size_t>(slots)) {
         RAFT_CUDA_TRY(cudaEventSynchronize(consumed[slot].get()));
       }
@@ -526,16 +517,8 @@ inline auto build_fine_clusters(const raft::resources& handle,
       auto* device_stage = device_data.data() + slot * max_rows * dim;
       auto* device_norms = device_norm.data() + slot * max_rows;
       RAFT_CUDA_TRY(cudaStreamWaitEvent(copy_stream.view().get(), consumed[slot].get(), 0));
-      RAFT_CUDA_TRY(cudaMemcpyAsync(device_stage,
-                                    stage,
-                                    rows * dim * sizeof(float),
-                                    cudaMemcpyHostToDevice,
-                                    copy_stream.view().get()));
-      RAFT_CUDA_TRY(cudaMemcpyAsync(device_norms,
-                                    norm_stage,
-                                    rows * sizeof(float),
-                                    cudaMemcpyHostToDevice,
-                                    copy_stream.view().get()));
+      raft::update_device(device_stage, stage, rows * dim, copy_stream.view());
+      raft::update_device(device_norms, norm_stage, rows, copy_stream.view());
       RAFT_CUDA_TRY(cudaEventRecord(ready[slot].get(), copy_stream.view().get()));
     });
   };
@@ -568,7 +551,7 @@ inline auto build_fine_clusters(const raft::resources& handle,
     RAFT_CUDA_TRY(cudaEventRecord(consumed[slot].get(), stream.get()));
   }
   raft::resource::sync_stream(handle, stream);
-  copy_stream.synchronize();
+  raft::resource::sync_stream(handle, copy_stream.view());
   return clusters_done;
 }
 
@@ -595,7 +578,7 @@ inline auto compute_inertia(const raft::resources& handle,
     batches.prefetch_next_batch();
   }
   raft::resource::sync_stream(handle, stream);
-  copy_stream.synchronize();
+  raft::resource::sync_stream(handle, copy_stream.view());
   return result;
 }
 
