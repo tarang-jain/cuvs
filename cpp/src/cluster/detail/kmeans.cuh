@@ -499,27 +499,52 @@ void initScalableKMeansPlusPlus(raft::resources const& handle,
           params.batch_centroids,
           workspace);
 
-      auto mergeAssignment = [&](auto newIndices, auto newDistances) {
-        auto* minDistances = minClusterDistanceVec.data_handle();
-        auto* labels       = nearestCandidate.data_handle();
-        thrust::for_each_n(
-          raft::resource::get_thrust_policy(handle),
-          cuda::counting_iterator<IndexT>(0),
-          n_samples,
-          [=] __device__(IndexT idx) {
-            const DataT newDistance = static_cast<DataT>(newDistances[idx]);
-            if (newDistance < minDistances[idx]) {
-              minDistances[idx] = newDistance;
-              labels[idx]       = candidateOffset + static_cast<IndexT>(newIndices[idx]);
-            }
-          });
-      };
-
       newAssignment.visit_native(
-        [&](auto newIndices, auto newDistances) { mergeAssignment(newIndices, newDistances); },
+        [&](auto newIndices, auto newDistances) {
+          auto newIndicesView = raft::make_device_vector_view<const IndexT, IndexT>(
+            newIndices, newAssignment.size());
+          auto newDistancesView = raft::make_device_vector_view<const DataT, IndexT>(
+            newDistances, newAssignment.size());
+          raft::linalg::map(
+            handle,
+            nearestCandidate.view(),
+            [candidateOffset] __device__(
+              DataT currentDistance, IndexT currentLabel, IndexT newIndex, DataT newDistance) {
+              return newDistance < currentDistance ? candidateOffset + newIndex : currentLabel;
+            },
+            raft::make_const_mdspan(minClusterDistanceVec.view()),
+            raft::make_const_mdspan(nearestCandidate.view()),
+            newIndicesView,
+            newDistancesView);
+          raft::linalg::map(handle,
+                            minClusterDistanceVec.view(),
+                            raft::min_op{},
+                            raft::make_const_mdspan(minClusterDistanceVec.view()),
+                            newDistancesView);
+        },
         [&](auto keyValues) {
-          mergeAssignment(cuda::transform_iterator(keyValues, raft::key_op{}),
-                          cuda::transform_iterator(keyValues, raft::value_op{}));
+          using KeyValueT = raft::KeyValuePair<IndexT, DataT>;
+          auto keyValuesView = raft::make_device_vector_view<const KeyValueT, IndexT>(
+            keyValues, newAssignment.size());
+          raft::linalg::map(
+            handle,
+            nearestCandidate.view(),
+            [candidateOffset] __device__(
+              DataT currentDistance, IndexT currentLabel, KeyValueT newAssignment) {
+              return newAssignment.value < currentDistance ? candidateOffset + newAssignment.key
+                                                           : currentLabel;
+            },
+            raft::make_const_mdspan(minClusterDistanceVec.view()),
+            raft::make_const_mdspan(nearestCandidate.view()),
+            keyValuesView);
+          raft::linalg::map(
+            handle,
+            minClusterDistanceVec.view(),
+            [] __device__(DataT currentDistance, KeyValueT newAssignment) {
+              return newAssignment.value < currentDistance ? newAssignment.value : currentDistance;
+            },
+            raft::make_const_mdspan(minClusterDistanceVec.view()),
+            keyValuesView);
         });
 
       if (iter + 1 < niter) {
