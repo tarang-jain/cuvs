@@ -341,6 +341,42 @@ void kmeans_fit(
 
  */
 template <typename DataT, typename IndexT>
+struct MergeSeparateAssignmentOp {
+  IndexT candidate_offset;
+  IndexT* nearest_candidates;
+  const IndexT* new_indices;
+  const DataT* new_distances;
+
+  __device__ DataT operator()(IndexT idx, DataT current_distance) const
+  {
+    auto new_distance = new_distances[idx];
+    if (new_distance < current_distance) {
+      nearest_candidates[idx] = candidate_offset + new_indices[idx];
+      return new_distance;
+    }
+    return current_distance;
+  }
+};
+
+template <typename DataT, typename IndexT>
+struct MergeKeyValueAssignmentOp {
+  IndexT candidate_offset;
+  IndexT* nearest_candidates;
+  const raft::KeyValuePair<IndexT, DataT>* new_assignments;
+
+  __device__ DataT operator()(IndexT idx, DataT current_distance) const
+  {
+    auto new_assignment = new_assignments[idx];
+    if (new_assignment.value < current_distance) {
+      nearest_candidates[idx] = candidate_offset + new_assignment.key;
+      return new_assignment.value;
+    }
+    return current_distance;
+  }
+};
+
+
+template <typename DataT, typename IndexT>
 void initScalableKMeansPlusPlus(raft::resources const& handle,
                                 const cuvs::cluster::kmeans::params& params,
                                 raft::device_matrix_view<const DataT, IndexT> X,
@@ -505,30 +541,16 @@ void initScalableKMeansPlusPlus(raft::resources const& handle,
           raft::linalg::map_offset(
             handle,
             minClusterDistanceVec.view(),
-            [candidateOffset, nearestCandidates, newIndices, newDistances] __device__(
-              IndexT idx, DataT currentDistance) {
-              auto newDistance = newDistances[idx];
-              if (newDistance < currentDistance) {
-                nearestCandidates[idx] = candidateOffset + newIndices[idx];
-                return newDistance;
-              }
-              return currentDistance;
-            },
+            MergeSeparateAssignmentOp<DataT, IndexT>{
+              candidateOffset, nearestCandidates, newIndices, newDistances},
             raft::make_const_mdspan(minClusterDistanceVec.view()));
         },
         [&](auto keyValues) {
           raft::linalg::map_offset(
             handle,
             minClusterDistanceVec.view(),
-            [candidateOffset, nearestCandidates, keyValues] __device__(
-              IndexT idx, DataT currentDistance) {
-              auto newAssignment = keyValues[idx];
-              if (newAssignment.value < currentDistance) {
-                nearestCandidates[idx] = candidateOffset + newAssignment.key;
-                return newAssignment.value;
-              }
-              return currentDistance;
-            },
+            MergeKeyValueAssignmentOp<DataT, IndexT>{
+              candidateOffset, nearestCandidates, keyValues},
             raft::make_const_mdspan(minClusterDistanceVec.view()));
         });
 
