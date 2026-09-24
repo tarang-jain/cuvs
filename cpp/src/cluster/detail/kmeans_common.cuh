@@ -288,11 +288,11 @@ void weightAndComputeClusterCost(raft::resources const& handle,
   });
 }
 
-template <typename DataT, typename IndexT>
-void sampleCentroids(raft::resources const& handle,
-                     raft::device_matrix_view<const DataT, IndexT> X,
-                     raft::device_vector_view<DataT, IndexT> minClusterDistance,
-                     raft::device_vector_view<uint8_t, IndexT> isSampleCentroid,
+template <typename DataT, typename IndexT, typename DistanceIterator>
+void sampleCentroidsFromIterator(raft::resources const& handle,
+                                 raft::device_matrix_view<const DataT, IndexT> X,
+                                 DistanceIterator minClusterDistance,
+                                 raft::device_vector_view<uint8_t, IndexT> isSampleCentroid,
                      SamplingOp<DataT, IndexT>& select_op,
                      rmm::device_uvector<DataT>& inRankCp,
                      rmm::device_uvector<char>& workspace)
@@ -302,7 +302,7 @@ void sampleCentroids(raft::resources const& handle,
   auto n_features      = X.extent(1);
 
   auto nSelected = raft::make_device_scalar<IndexT>(handle, 0);
-  cub::ArgIndexInputIterator<DataT*> ip_itr(minClusterDistance.data_handle());
+  cub::ArgIndexInputIterator<DistanceIterator> ip_itr(minClusterDistance);
   auto sampledMinClusterDistance =
     raft::make_device_vector<raft::KeyValuePair<ptrdiff_t, DataT>, IndexT>(handle, n_local_samples);
   size_t temp_storage_bytes = 0;
@@ -350,6 +350,24 @@ void sampleCentroids(raft::resources const& handle,
                        inRankCp.data(),
                        raft::key_op{},
                        stream);
+}
+
+template <typename DataT, typename IndexT>
+void sampleCentroids(raft::resources const& handle,
+                     raft::device_matrix_view<const DataT, IndexT> X,
+                     raft::device_vector_view<DataT, IndexT> minClusterDistance,
+                     raft::device_vector_view<uint8_t, IndexT> isSampleCentroid,
+                     SamplingOp<DataT, IndexT>& select_op,
+                     rmm::device_uvector<DataT>& inRankCp,
+                     rmm::device_uvector<char>& workspace)
+{
+  sampleCentroidsFromIterator<DataT, IndexT>(handle,
+                                              X,
+                                              minClusterDistance.data_handle(),
+                                              isSampleCentroid,
+                                              select_op,
+                                              inRankCp,
+                                              workspace);
 }
 
 // calculate pairwise distance between 'dataset[n x d]' and 'centroids[k x d]',
