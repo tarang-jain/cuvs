@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../common/ann_types.hpp"
+#include "../common/training_sample.hpp"
 #include "cuvs_ann_bench_utils.h"
 
 #include <cuvs/distance/distance.hpp>
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -35,7 +37,10 @@ class cuvs_ivf_flat : public algo<T>, public algo_gpu {
     cuvs::neighbors::ivf_flat::search_params ivf_flat_params;
   };
 
-  using build_param = cuvs::neighbors::ivf_flat::index_params;
+  struct build_param : cuvs::neighbors::ivf_flat::index_params {
+    std::optional<std::size_t> max_train_points_per_centroid;
+    std::uint64_t sampling_seed = 42;
+  };
 
   cuvs_ivf_flat(Metric metric, int dim, const build_param& param)
     : algo<T>(metric, dim), index_params_(param), dimension_(dim)
@@ -87,6 +92,34 @@ class cuvs_ivf_flat : public algo<T>, public algo_gpu {
 template <typename T, typename IdxT>
 void cuvs_ivf_flat<T, IdxT>::build(const T* dataset, size_t nrow)
 {
+  if (index_params_.max_train_points_per_centroid.has_value()) {
+    const auto sample_size = training_sample_size(
+      nrow, index_params_.n_lists, *index_params_.max_train_points_per_centroid);
+    auto training_sample = make_training_sample(dataset,
+                                                nrow,
+                                                static_cast<std::size_t>(dimension_),
+                                                sample_size,
+                                                index_params_.sampling_seed);
+
+    auto training_params                     = index_params_;
+    training_params.add_data_on_build        = false;
+    training_params.kmeans_trainset_fraction = 1.0;
+    auto trained_index =
+      cuvs::neighbors::ivf_flat::build(handle_,
+                                       training_params,
+                                       raft::make_host_matrix_view<const T, int64_t>(
+                                         training_sample.data(), sample_size, dimension_));
+    raft::resource::sync_stream(handle_);
+
+    cuvs::neighbors::ivf_flat::extend(
+      handle_,
+      raft::make_host_matrix_view<const T, int64_t>(dataset, nrow, dimension_),
+      std::nullopt,
+      &trained_index);
+    index_ = std::make_shared<cuvs::neighbors::ivf_flat::index<T, IdxT>>(std::move(trained_index));
+    return;
+  }
+
   index_ = std::make_shared<cuvs::neighbors::ivf_flat::index<T, IdxT>>(
     std::move(cuvs::neighbors::ivf_flat::build(
       handle_,
