@@ -577,6 +577,91 @@ TEST(QuantizationDatasetTest, PerDimensionDataset)
                           stream.get()));
 }
 
+template <typename T>
+void check_dataset_error(range_mode mode)
+{
+  raft::resources res;
+  auto const stream   = raft::resource::get_cuda_stream(res);
+  constexpr int64_t n = 17, d = 16;
+  std::vector<T> host(n * d);
+  for (int64_t i = 0; i < n * d; ++i) {
+    host[i] = T(float(i % 23) * .13f - .8f);
+  }
+  host.back() = T(50.f);  // Quantile clipping must be included in the dataset-wide maximum.
+  auto data   = raft::make_device_matrix<T, int64_t>(res, n, d);
+  raft::update_device(data.data_handle(), host.data(), host.size(), stream);
+  auto encoded =
+    build(res, params{.quantile = .5f, .range = mode}, raft::make_const_mdspan(data.view()));
+  auto moved          = std::move(encoded);
+  auto const manifest = moved.const_manifest_view();
+  std::vector<int8_t> codes(n * d);
+  raft::update_host(codes.data(), moved.data_const_view().data_handle(), codes.size(), stream);
+  std::vector<T> shifts(d);
+  double scale, shift = 0;
+  if (mode == range_mode::global) {
+    auto const range = std::get<typename quantizer_const_view<T>::range_type>(manifest.value);
+    scale            = (double(range.max_) - double(range.min_)) / 255.;
+    shift            = double(range.min_) + 128. * scale;
+  } else {
+    auto const params = std::get<typename quantizer_const_view<T>::shifts_type>(manifest.value);
+    scale             = double(params.scale);
+    raft::update_host(shifts.data(), params.shifts.data_handle(), d, stream);
+  }
+  raft::resource::sync_stream(res);
+  long double expected = 0;
+  for (int64_t row = 0; row < n; ++row) {
+    long double squared = 0;
+    for (int64_t j = 0; j < d; ++j) {
+      long double origin = mode == range_mode::global ? shift : double(shifts[j]);
+      long double delta =
+        double(host[row * d + j]) - (origin + static_cast<long double>(scale) * codes[row * d + j]);
+      squared += delta * delta;
+    }
+    expected = std::max(expected, std::sqrt(squared));
+  }
+  EXPECT_GT(expected, 1.0);  // This would fail if only half a quantization step were stored.
+  EXPECT_GE(static_cast<long double>(manifest.max_error), expected);
+  EXPECT_NEAR(manifest.max_error, double(expected), 1e-11 * double(expected));
+  EXPECT_EQ(std::as_const(moved).view().const_manifest_view().max_error, manifest.max_error);
+}
+
+TEST(QuantizationDatasetTest, ConservativeMaximumError)
+{
+  check_dataset_error<float>(range_mode::global);
+  check_dataset_error<float>(range_mode::per_dimension);
+  check_dataset_error<double>(range_mode::per_dimension);
+  check_dataset_error<half>(range_mode::per_dimension);
+}
+
+TEST(QuantizationDatasetTest, ManifestImplicitConversion)
+{
+  using dataset_type = cuvs::device_sq_dataset<float, int64_t, float>;
+  dataset_type::manifest_type owner{quantizer<float>{-1.f, 1.f}, .25};
+  dataset_type::manifest_view_type borrowed = owner;
+  EXPECT_EQ(borrowed.max_error, .25);
+  // The original quantizer-view conversion must remain unambiguous too.
+  quantizer_const_view<float> quantizer_view = owner;
+  EXPECT_EQ(std::get<quantizer_const_view<float>::range_type>(quantizer_view.value).min_, -1.f);
+}
+
+TEST(QuantizationDatasetTest, ErrorMeasurementEmptyAndInvalidShapes)
+{
+  raft::resources res;
+  quantizer<float> quantizer{0.f, 255.f};
+  EXPECT_EQ(
+    max_quantization_error(res,
+                           quantizer,
+                           raft::make_device_matrix_view<const float, int64_t>(nullptr, 0, 16),
+                           raft::make_device_matrix_view<const int8_t, int64_t>(nullptr, 0, 16)),
+    0.0);
+  EXPECT_THROW(
+    max_quantization_error(res,
+                           quantizer,
+                           raft::make_device_matrix_view<const float, int64_t>(nullptr, 1, 16),
+                           raft::make_device_matrix_view<const int8_t, int64_t>(nullptr, 1, 32)),
+    raft::logic_error);
+}
+
 TEST_P(PerDimensionRangeTest, Result) { this->testPerDimensionQuantization(); }
 
 typedef QuantizationTest<float, int8_t> QuantizationTest_float_int8t;

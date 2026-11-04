@@ -38,44 +38,15 @@
 #include <string_view>
 #include <variant>
 
+#include "../../preprocessing/quantize/detail/scalar_error.cuh"
 #include "./faiss_distance_utils.h"
 
 namespace cuvs::neighbors::detail {
 
 constexpr int kInt8BlockSize = 256;
 
-template <typename T>
-struct sq_affine_parameters {
-  double scale;
-  double shift;
-  T const* shifts;
-};
-
-template <typename T>
-sq_affine_parameters<T> get_sq_affine_parameters(
-  cuvs::preprocessing::quantize::scalar::quantizer_const_view<T> quantizer, int64_t dim)
-{
-  using view_type = cuvs::preprocessing::quantize::scalar::quantizer_const_view<T>;
-  sq_affine_parameters<T> affine{};
-  if (auto const* range = std::get_if<typename view_type::range_type>(&quantizer.value)) {
-    auto const lo = static_cast<double>(range->min_);
-    auto const hi = static_cast<double>(range->max_);
-    RAFT_EXPECTS(std::isfinite(lo) && std::isfinite(hi) && hi >= lo,
-                 "SQ bounds must be finite with min <= max");
-    constexpr double code_min = std::numeric_limits<int8_t>::min();
-    constexpr double code_max = std::numeric_limits<int8_t>::max();
-    affine.scale              = hi > lo ? (hi - lo) / (code_max - code_min) : 1.0;
-    affine.shift              = lo - code_min * affine.scale;
-  } else {
-    auto const& shifts = std::get<typename view_type::shifts_type>(quantizer.value);
-    RAFT_EXPECTS(shifts.shifts.extent(0) == dim, "SQ shifts must match the dataset dimension");
-    affine.scale  = static_cast<double>(shifts.scale);
-    affine.shifts = shifts.shifts.data_handle();
-  }
-  RAFT_EXPECTS(std::isfinite(affine.scale) && affine.scale > 0.0 && std::isfinite(affine.shift),
-               "SQ scale must be positive and finite, and its shift must be finite");
-  return affine;
-}
+using cuvs::preprocessing::quantize::scalar::detail::get_sq_affine_parameters;
+using cuvs::preprocessing::quantize::scalar::detail::sq_affine_parameters;
 
 template <typename T>
 void compute_sq_statistics(raft::resources const& res,
@@ -262,7 +233,7 @@ void int8_brute_force_search(raft::resources const& res,
   auto const stream    = raft::resource::get_cuda_stream(res);
   auto const dataset   = index.dataset();
   auto const quantizer = dataset.const_manifest_view();
-  auto const affine    = get_sq_affine_parameters(quantizer, d);
+  auto const affine    = get_sq_affine_parameters<T>(quantizer, d);
   auto queries_storage = raft::make_device_matrix<std::int8_t, int64_t>(res, m, d);
   cuvs::preprocessing::quantize::scalar::transform(res, quantizer, queries, queries_storage.view());
   auto const* queries_ptr = queries_storage.data_handle();

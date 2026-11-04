@@ -225,6 +225,91 @@ operator view_type() const noexcept;
 
 `operator`
 
+<a id="preprocessing-quantize-scalar-max-quantization-error"></a>
+### preprocessing::quantize::scalar::max_quantization_error
+
+Measure the maximum Euclidean error of affine scalar-quantized reconstructions. Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+
+```cpp
+double max_quantization_error(raft::resources const& res,
+quantizer_const_view<float> quantizer,
+raft::device_matrix_view<const float, int64_t> original,
+raft::device_matrix_view<const int8_t, int64_t> codes);
+```
+
+Throws `raft::logic_error` if original and codes have different shapes, or if the quantizer parameters are invalid.
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `res` | in | `raft::resources const&` | Resources used for computation. |
+| `quantizer` | in | [`quantizer_const_view<float>`](/api-reference/cpp-api-preprocessing-quantize-scalar#preprocessing-quantize-scalar-quantizer-const-view) | Quantizer used to encode the data. |
+| `original` | in | `raft::device_matrix_view<const float, int64_t>` | Original device vectors. |
+| `codes` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Encoded vectors, with the same shape as original. |
+
+**Returns**
+
+`double`
+
+An upper bound on max_row \|\|original[row] - (scale * codes[row] + shift)\|\|. Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+
+**Additional overload:** `preprocessing::quantize::scalar::max_quantization_error`
+
+Measure the maximum Euclidean error of affine scalar-quantized reconstructions. Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+
+```cpp
+double max_quantization_error(raft::resources const& res,
+quantizer_const_view<half> quantizer,
+raft::device_matrix_view<const half, int64_t> original,
+raft::device_matrix_view<const int8_t, int64_t> codes);
+```
+
+Throws `raft::logic_error` if original and codes have different shapes, or if the quantizer parameters are invalid.
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `res` | in | `raft::resources const&` | Resources used for computation. |
+| `quantizer` | in | [`quantizer_const_view<half>`](/api-reference/cpp-api-preprocessing-quantize-scalar#preprocessing-quantize-scalar-quantizer-const-view) | Quantizer used to encode the data. |
+| `original` | in | `raft::device_matrix_view<const half, int64_t>` | Original device vectors. |
+| `codes` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Encoded vectors, with the same shape as original. |
+
+**Returns**
+
+`double`
+
+An upper bound on max_row \|\|original[row] - (scale * codes[row] + shift)\|\|. Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+
+**Additional overload:** `preprocessing::quantize::scalar::max_quantization_error`
+
+Measure the maximum Euclidean error of affine scalar-quantized reconstructions. Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+
+```cpp
+double max_quantization_error(raft::resources const& res,
+quantizer_const_view<double> quantizer,
+raft::device_matrix_view<const double, int64_t> original,
+raft::device_matrix_view<const int8_t, int64_t> codes);
+```
+
+Throws `raft::logic_error` if original and codes have different shapes, or if the quantizer parameters are invalid.
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `res` | in | `raft::resources const&` | Resources used for computation. |
+| `quantizer` | in | [`quantizer_const_view<double>`](/api-reference/cpp-api-preprocessing-quantize-scalar#preprocessing-quantize-scalar-quantizer-const-view) | Quantizer used to encode the data. |
+| `original` | in | `raft::device_matrix_view<const double, int64_t>` | Original device vectors. |
+| `codes` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Encoded vectors, with the same shape as original. |
+
+**Returns**
+
+`double`
+
+An upper bound on max_row \|\|original[row] - (scale * codes[row] + shift)\|\|. Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+
 <a id="preprocessing-quantize-scalar-train"></a>
 ### preprocessing::quantize::scalar::train
 

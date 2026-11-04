@@ -5,6 +5,7 @@
 
 #include <cuvs/core/cuda_fp16.hpp>
 
+#include "./detail/bounded_brute_force.cuh"
 #include "./detail/int8_brute_force.cuh"
 #include "./detail/knn_brute_force.cuh"
 
@@ -315,6 +316,17 @@ index<T, DistT, DatasetViewT>::index(raft::resources const& res,
 CUVS_INST_SQ_BFKNN(float);
 CUVS_INST_SQ_BFKNN(half);
 CUVS_INST_SQ_BFKNN(double);
+
+void search(raft::resources const& res,
+            const search_params& params,
+            const device_sq_index<float>& idx,
+            raft::device_matrix_view<const float, int64_t, raft::row_major> original,
+            raft::device_matrix_view<const float, int64_t, raft::row_major> queries,
+            raft::device_matrix_view<int64_t, int64_t, raft::row_major> neighbors,
+            raft::device_matrix_view<float, int64_t, raft::row_major> distances)
+{
+  detail::bounded_int8::search(res, idx, original, queries, neighbors, distances);
+}
 
 #undef CUVS_INST_SQ_BFKNN
 

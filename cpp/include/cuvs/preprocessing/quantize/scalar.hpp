@@ -113,6 +113,63 @@ struct quantizer {
 };
 
 /**
+ * @brief Measure the maximum Euclidean error of affine scalar-quantized reconstructions.
+ * Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+ *
+ * Throws `raft::logic_error` if original and codes have different shapes, or if
+ * the quantizer parameters are invalid.
+ *
+ * @param[in] res Resources used for computation.
+ * @param[in] quantizer Quantizer used to encode the data.
+ * @param[in] original Original device vectors.
+ * @param[in] codes Encoded vectors, with the same shape as original.
+ * @return An upper bound on max_row ||original[row] - (scale * codes[row] + shift)||.
+ * Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+ */
+double max_quantization_error(raft::resources const& res,
+                              quantizer_const_view<float> quantizer,
+                              raft::device_matrix_view<const float, int64_t> original,
+                              raft::device_matrix_view<const int8_t, int64_t> codes);
+
+/**
+ * @brief Measure the maximum Euclidean error of affine scalar-quantized reconstructions.
+ * Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+ *
+ * Throws `raft::logic_error` if original and codes have different shapes, or if
+ * the quantizer parameters are invalid.
+ *
+ * @param[in] res Resources used for computation.
+ * @param[in] quantizer Quantizer used to encode the data.
+ * @param[in] original Original device vectors.
+ * @param[in] codes Encoded vectors, with the same shape as original.
+ * @return An upper bound on max_row ||original[row] - (scale * codes[row] + shift)||.
+ * Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+ */
+double max_quantization_error(raft::resources const& res,
+                              quantizer_const_view<half> quantizer,
+                              raft::device_matrix_view<const half, int64_t> original,
+                              raft::device_matrix_view<const int8_t, int64_t> codes);
+
+/**
+ * @brief Measure the maximum Euclidean error of affine scalar-quantized reconstructions.
+ * Includes clipped outliers and rounds conservatively. Synchronizes the stream.
+ *
+ * Throws `raft::logic_error` if original and codes have different shapes, or if
+ * the quantizer parameters are invalid.
+ *
+ * @param[in] res Resources used for computation.
+ * @param[in] quantizer Quantizer used to encode the data.
+ * @param[in] original Original device vectors.
+ * @param[in] codes Encoded vectors, with the same shape as original.
+ * @return An upper bound on max_row ||original[row] - (scale * codes[row] + shift)||.
+ * Nonfinite input or reconstruction yields infinity. An empty dataset yields zero.
+ */
+double max_quantization_error(raft::resources const& res,
+                              quantizer_const_view<double> quantizer,
+                              raft::device_matrix_view<const double, int64_t> original,
+                              raft::device_matrix_view<const int8_t, int64_t> codes);
+
+/**
  * @brief Initializes a scalar quantizer to be used later for quantizing the dataset.
  *
  * Usage example:

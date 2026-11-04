@@ -721,6 +721,39 @@ void search(raft::resources const& handle,
               cuvs::neighbors::filtering::none_sample_filter());
 
 /**
+ * @brief Search an SQ index with bounded INT8 GEMM and FP32 refinement of the original rows.
+ *
+ * Supports L2 metrics and dimensions divisible by 16, including dimensions above 256.
+ * The original finite FP32 dataset must match the index's codes, quantizer, row order, and
+ * recorded maximum reconstruction error. It must remain device-accessible until stream work
+ * completes. If the SQ manifest has no measured error bound (infinity), every row is refined.
+ *
+ * A sample supplies the initial conservative bound. A fused GEMM emits only candidates that
+ * can enter top-k; their original FP32 distances update the bound as corpus tiles are searched.
+ * Square-root metrics accumulate in FP64 and take the square root before converting to FP32.
+ * Results are sorted by increasing distance. This overload synchronizes the resource stream
+ * to obtain each tile's candidate count; refinement and selection run entirely on the device.
+ *
+ * Throws `raft::logic_error` if the metric, dimension, input/output shapes, k, code
+ * alignment, or maximum reconstruction error is invalid.
+ *
+ * @param[in] res Resources used for search and temporary allocations.
+ * @param[in] params Search parameters.
+ * @param[in] idx Scalar-quantized index with 16-byte-aligned codes.
+ * @param[in] original Original FP32 corpus, with the same shape and row order as idx.
+ * @param[in] queries Finite FP32 query matrix, with the index's dimension.
+ * @param[out] neighbors Neighbor IDs [number of queries, k], with 1 <= k <= idx.size().
+ * @param[out] distances Refined distances, with the same shape as neighbors.
+ */
+void search(raft::resources const& res,
+            const cuvs::neighbors::brute_force::search_params& params,
+            const cuvs::neighbors::brute_force::device_sq_index<float>& idx,
+            raft::device_matrix_view<const float, int64_t, raft::row_major> original,
+            raft::device_matrix_view<const float, int64_t, raft::row_major> queries,
+            raft::device_matrix_view<int64_t, int64_t, raft::row_major> neighbors,
+            raft::device_matrix_view<float, int64_t, raft::row_major> distances);
+
+/**
  * @}
  */
 

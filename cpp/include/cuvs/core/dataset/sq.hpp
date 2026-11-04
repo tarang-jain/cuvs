@@ -15,6 +15,7 @@
 #include <raft/core/mdarray.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -34,9 +35,53 @@ struct sq_spec {
 
   using math_type = MathT;
 
-  // The manifest is either a global interval or owning per-dimension shifts and a shared scale.
-  using manifest_type      = cuvs::preprocessing::quantize::scalar::quantizer<MathT>;
-  using manifest_view_type = typename manifest_type::view_type;
+  using quantizer_type = cuvs::preprocessing::quantize::scalar::quantizer<MathT>;
+
+  /** Quantizer parameters and a bound on this dataset's Euclidean reconstruction error.
+   * The quantizer base keeps existing transform/inverse_transform calls source-compatible. */
+  struct manifest_view_type : quantizer_type::view_type {
+    /** Maximum ||x - (scale * code + shift)|| over the encoded dataset, in original units.
+     * Infinity means no error bound is available and bounded search cannot prune rows.
+     * Modifying codes or quantizer parameters invalidates a previously computed bound. */
+    double max_error = std::numeric_limits<double>::infinity();
+
+    /** Construct empty quantizer parameters with no measured error bound. */
+    manifest_view_type() = default;
+
+    /** Borrow quantizer parameters and the associated codes' maximum reconstruction error.
+     * The quantizer owner must outlive use of the view. */
+    manifest_view_type(typename quantizer_type::view_type quantizer,
+                       double error = std::numeric_limits<double>::infinity())
+      : quantizer_type::view_type{quantizer}, max_error{error}
+    {
+    }
+  };
+
+  /** Owns the quantizer and the maximum reconstruction error for the associated codes.
+   * Existing quantizer constructors and parameter access remain available. */
+  struct manifest_type : quantizer_type {
+    using quantizer_type::quantizer_type;
+    using view_type  = manifest_view_type;
+    double max_error = std::numeric_limits<double>::infinity();
+
+    /** Construct an empty quantizer with no measured error bound. */
+    manifest_type() = default;
+
+    /** Take ownership of a quantizer and optionally a measured error bound for these codes. */
+    manifest_type(quantizer_type&& q, double error = std::numeric_limits<double>::infinity())
+      : quantizer_type{std::move(q)}, max_error{error}
+    {
+    }
+
+    /** Borrow parameters and the error bound; this owner must outlive use of the view. */
+    [[nodiscard]] auto view() const noexcept -> manifest_view_type
+    {
+      return {quantizer_type::view(), max_error};
+    }
+
+    /** Borrow a manifest view implicitly, preserving the associated error bound. */
+    operator view_type() const noexcept { return view(); }  // NOLINT(google-explicit-constructor)
+  };
 
   template <typename T, typename IdxT>
   struct apply : storage_spec<IdxT> {
@@ -86,7 +131,14 @@ namespace preprocessing::quantize::scalar {
 /**
  * @defgroup scalar_dataset Scalar-quantized dataset construction
  * @{
- * Train and encode a device corpus with the selected range mode.
+ */
+/**
+ * @brief Train and encode a device corpus and measure its maximum reconstruction error.
+ * Synchronizes the stream to return the dataset-wide error bound on the host.
+ * @param[in] res Resources for training, encoding, and error measurement.
+ * @param[in] params Scalar quantizer parameters.
+ * @param[in] dataset Original device corpus to train on and encode.
+ * @return Dataset owning codes, quantizer, and a conservative maximum L2 reconstruction error.
  * Reuse result.const_manifest_view() with transform
  * for query batches. For separate training/encoding, use train and transform.
  */
@@ -98,7 +150,11 @@ inline device_sq_dataset<T, int64_t, T> build(raft::resources const& res,
   auto quantizer = train(res, params, dataset);
   auto codes = raft::make_device_matrix<int8_t, int64_t>(res, dataset.extent(0), dataset.extent(1));
   transform(res, quantizer.view(), dataset, codes.view());
-  return device_sq_dataset<T, int64_t, T>{std::move(codes), std::move(quantizer)};
+  auto const error =
+    max_quantization_error(res, quantizer.view(), dataset, raft::make_const_mdspan(codes.view()));
+  using result_type = device_sq_dataset<T, int64_t, T>;
+  return result_type{std::move(codes),
+                     typename result_type::manifest_type{std::move(quantizer), error}};
 }
 
 /** @} */
