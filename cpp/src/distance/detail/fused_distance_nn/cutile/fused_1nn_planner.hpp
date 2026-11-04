@@ -31,13 +31,21 @@ inline const char* fused_1nn_kernel_entrypoint()
   } else if constexpr (std::is_same_v<DataTag, cuvs::neighbors::detail::tag_h>) {
     if constexpr (is_high_dim) return "fused_1nn_h_i32_hd";
     return is_relaxed ? "fused_1nn_h_i32_relaxed" : "fused_1nn_h_i32";
+  } else if constexpr (std::is_same_v<DataTag, cuvs::neighbors::detail::tag_i8f>) {
+    return is_relaxed ? "fused_1nn_i8f_i32_relaxed" : "fused_1nn_i8f_i32";
+  } else if constexpr (std::is_same_v<DataTag, cuvs::neighbors::detail::tag_u8f>) {
+    return is_relaxed ? "fused_1nn_u8f_i32_relaxed" : "fused_1nn_u8f_i32";
+  } else if constexpr (std::is_same_v<DataTag, cuvs::neighbors::detail::tag_i8>) {
+    return is_relaxed ? "fused_1nn_i8_i32_relaxed" : "fused_1nn_i8_i32";
+  } else if constexpr (std::is_same_v<DataTag, cuvs::neighbors::detail::tag_u8>) {
+    return is_relaxed ? "fused_1nn_u8_i32_relaxed" : "fused_1nn_u8_i32";
   } else {
     static_assert(sizeof(DataTag) == 0, "unsupported fused 1-NN cuTile data type");
     return "";
   }
 }
 
-template <typename DataT, typename AbiTag>
+template <typename DataT, typename AbiTag, typename CenterT = DataT>
 struct Fused1nnTilePlanner : cuvs::detail::jit_lto::TileAlgorithmPlanner {
   using DataTag  = std::conditional_t<std::is_same_v<DataT, float>,
                                       cuvs::neighbors::detail::tag_f,
@@ -225,6 +233,70 @@ struct Fused1nnTilePlanner<DataT, cutile_abi_high_dim>
                                      cutile_abi_high_dim,
                                      cutile_arch_12_0>>();
     }
+  }
+};
+
+template <typename DataT, typename AbiTag, typename CenterT>
+  requires((std::is_same_v<DataT, int8_t> || std::is_same_v<DataT, uint8_t>) &&
+           (std::is_same_v<CenterT, DataT> || std::is_same_v<CenterT, float>) &&
+           !std::is_same_v<AbiTag, cutile_abi_high_dim>)
+struct Fused1nnTilePlanner<DataT, AbiTag, CenterT> : cuvs::detail::jit_lto::TileAlgorithmPlanner {
+  using ByteTag  = std::conditional_t<std::is_same_v<DataT, int8_t>,
+                                      cuvs::neighbors::detail::tag_i8,
+                                      cuvs::neighbors::detail::tag_u8>;
+  using MixedTag = std::conditional_t<std::is_same_v<DataT, int8_t>,
+                                      cuvs::neighbors::detail::tag_i8f,
+                                      cuvs::neighbors::detail::tag_u8f>;
+  using DataTag  = std::conditional_t<std::is_same_v<CenterT, float>, MixedTag, ByteTag>;
+  using IndexTag = cuvs::neighbors::detail::tag_index_i32;
+  using TileTag  = cutile_tile_config<64, 128, std::is_same_v<CenterT, float> ? 32 : 128>;
+  inline static cuvs::detail::jit_lto::TileLauncherCache launcher_cache{};
+
+  Fused1nnTilePlanner()
+    : TileAlgorithmPlanner(fused_1nn_kernel_entrypoint<DataTag, AbiTag>(), launcher_cache)
+  {
+  }
+
+  void add_entrypoint()
+  {
+    this
+      ->add_static_fragment<fragment_tag_fused_1nn_cubin<DataTag,
+                                                         IndexTag,
+                                                         TileTag,
+                                                         AbiTag,
+                                                         cuvs::detail::jit_lto::cutile_arch_8_0>>();
+    this
+      ->add_static_fragment<fragment_tag_fused_1nn_cubin<DataTag,
+                                                         IndexTag,
+                                                         TileTag,
+                                                         AbiTag,
+                                                         cuvs::detail::jit_lto::cutile_arch_8_6>>();
+    this
+      ->add_static_fragment<fragment_tag_fused_1nn_cubin<DataTag,
+                                                         IndexTag,
+                                                         TileTag,
+                                                         AbiTag,
+                                                         cuvs::detail::jit_lto::cutile_arch_9_0>>();
+    this->add_static_fragment<
+      fragment_tag_fused_1nn_cubin<DataTag,
+                                   IndexTag,
+                                   TileTag,
+                                   AbiTag,
+                                   cuvs::detail::jit_lto::cutile_arch_10_0>>();
+    this->add_static_fragment<
+      fragment_tag_fused_1nn_cubin<DataTag,
+                                   IndexTag,
+                                   TileTag,
+                                   AbiTag,
+                                   cuvs::detail::jit_lto::cutile_arch_12_0>>();
+#if CUVS_CUTILE_SM107_ENABLED
+    this->add_static_fragment<
+      fragment_tag_fused_1nn_cubin<DataTag,
+                                   IndexTag,
+                                   TileTag,
+                                   AbiTag,
+                                   cuvs::detail::jit_lto::cutile_arch_10_7>>();
+#endif
   }
 };
 

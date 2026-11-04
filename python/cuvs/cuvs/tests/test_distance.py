@@ -71,3 +71,33 @@ def test_distance(n_rows, n_cols, inplace, order, metric, dtype, times):
     tol = 1e-3
 
     assert np.allclose(expected, actual, atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+@pytest.mark.parametrize("features", [17, 40000])
+@pytest.mark.parametrize(
+    "metric", ["sqeuclidean", "euclidean", "inner_product"]
+)
+def test_native_byte_distance(dtype, features, metric):
+    bounds = np.iinfo(dtype)
+    left = np.full((3, features), bounds.min, dtype=dtype)
+    right = np.full((2, features), bounds.max, dtype=dtype)
+    left[1, 0] = bounds.max
+    right[1, 0] = bounds.min
+    wide_left = left.astype(np.int64)
+    wide_right = right.astype(np.int64)
+    if metric == "inner_product":
+        expected = wide_left @ wide_right.T
+    else:
+        expected = ((wide_left[:, None, :] - wide_right[None, :, :]) ** 2).sum(
+            axis=2
+        )
+        if metric == "euclidean":
+            expected = np.sqrt(expected)
+    actual = pairwise_distance(
+        device_ndarray(left), device_ndarray(right), metric=metric
+    )
+    assert actual.dtype == np.float32
+    np.testing.assert_allclose(
+        actual.copy_to_host(), expected.astype(np.float32), rtol=1e-6
+    )

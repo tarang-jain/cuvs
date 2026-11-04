@@ -30,7 +30,8 @@ struct Top1nnOutput {
 namespace detail {
 
 template <typename DataT>
-using top_1_nn_distance_t = std::conditional_t<std::is_same_v<DataT, half>, float, DataT>;
+using top_1_nn_distance_t =
+  std::conditional_t<std::is_same_v<DataT, half> || std::is_integral_v<DataT>, float, DataT>;
 
 template <typename DataT, typename IdxT>
 struct Top1nnOutputTypes {
@@ -350,6 +351,10 @@ CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(double, int);
 CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(double, int64_t);
 CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(half, int);
 CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(half, int64_t);
+CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(int8_t, int);
+CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(int8_t, int64_t);
+CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(uint8_t, int);
+CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE(uint8_t, int64_t);
 
 #undef CUVS_EXTERN_TOP_1_NN_WORKSPACE_SIZE
 
@@ -373,6 +378,10 @@ CUVS_EXTERN_PROBE_TOP_1_NN(double, int);
 CUVS_EXTERN_PROBE_TOP_1_NN(double, int64_t);
 CUVS_EXTERN_PROBE_TOP_1_NN(half, int);
 CUVS_EXTERN_PROBE_TOP_1_NN(half, int64_t);
+CUVS_EXTERN_PROBE_TOP_1_NN(int8_t, int);
+CUVS_EXTERN_PROBE_TOP_1_NN(int8_t, int64_t);
+CUVS_EXTERN_PROBE_TOP_1_NN(uint8_t, int);
+CUVS_EXTERN_PROBE_TOP_1_NN(uint8_t, int64_t);
 
 #undef CUVS_EXTERN_PROBE_TOP_1_NN
 
@@ -410,6 +419,10 @@ CUVS_EXTERN_TOP_1_NN(double, int64_t, double, kvp);
 CUVS_EXTERN_TOP_1_NN(double, int64_t, double, scalar);
 CUVS_EXTERN_TOP_1_NN(half, int, float, separate);
 CUVS_EXTERN_TOP_1_NN(half, int64_t, float, separate);
+CUVS_EXTERN_TOP_1_NN(int8_t, int, int64_t, separate);
+CUVS_EXTERN_TOP_1_NN(int8_t, int64_t, int64_t, separate);
+CUVS_EXTERN_TOP_1_NN(uint8_t, int, int64_t, separate);
+CUVS_EXTERN_TOP_1_NN(uint8_t, int64_t, int64_t, separate);
 
 #undef CUVS_EXTERN_TOP_1_NN
 

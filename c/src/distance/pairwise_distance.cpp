@@ -52,6 +52,17 @@ extern "C" cuvsError_t cuvsPairwiseDistance(cuvsResources_t res,
 {
   return cuvs::core::translate_exceptions([=] {
     auto x_dt    = x_tensor->dl_tensor.dtype;
+    if (x_dt.bits == 8 && (x_dt.code == kDLInt || x_dt.code == kDLUInt)) {
+      if (x_dt.code == kDLInt) {
+        _pairwise_distance<int8_t, float>(res, x_tensor, y_tensor,
+                                          distances_tensor, metric, metric_arg);
+      } else {
+        _pairwise_distance<uint8_t, float>(
+            res, x_tensor, y_tensor, distances_tensor, metric, metric_arg);
+      }
+      return;
+    }
+
     auto y_dt    = x_tensor->dl_tensor.dtype;
     auto dist_dt = x_tensor->dl_tensor.dtype;
 

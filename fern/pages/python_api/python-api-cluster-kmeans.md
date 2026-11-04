@@ -145,6 +145,8 @@ def cluster_cost(X, centroids, resources=None)
 
 Compute cluster cost given an input matrix and existing centroids
 
+For int8/uint8 input, centroids are float32 in the original integer units.
+
 **Parameters**
 
 | Name | Type | Description |
@@ -218,7 +220,7 @@ fits. Configure both pools before calling ``fit``.
 | Name | Type | Description |
 | --- | --- | --- |
 | `params` | `KMeansParams` | Parameters to use to fit KMeans model.  For host data, ``params.device_buffer_samples`` controls how many samples are sent to the GPU per batch. |
-| `X` | `array-like` | Training instances, shape (m, k).  Accepts both device arrays (cupy / CUDA array interface) and host arrays (numpy). |
+| `X` | `array-like` | Training instances, shape (m, k).  Accepts both device arrays (cupy / CUDA array interface) and host arrays (numpy). Supports float32, float64, int8 and uint8. Byte input stays byte-sized; centroids and sample weights are float32 in the original integer units. |
 | `centroids` | `Optional writable CUDA array interface compliant matrix` | shape (n_clusters, k) |
 | `sample_weights` | `Optional weights per observation.  Must reside on` | the same memory space as X (device or host).<br />default: None |
 | `resources` | `cuvs.common.Resources, optional` |  |
@@ -278,6 +280,9 @@ def predict( KMeansParams params, X, centroids, sample_weights=None, labels=None
 ```
 
 Predict clusters with the k-means algorithm
+
+For int8/uint8 input, use float32 centroids and weights. Labels are int64;
+float input retains int32 labels.
 
 **Parameters**
 

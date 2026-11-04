@@ -574,56 +574,6 @@ void fit(raft::resources const& handle,
          raft::host_scalar_view<int64_t> n_iter);
 
 /**
- * @brief Find clusters with k-means algorithm.
- *   Initial centroids are chosen with k-means++ algorithm. Empty
- *   clusters are reinitialized by choosing new centroids with
- *   k-means++ algorithm.
- *
- * @code{.cpp}
- *   #include <raft/core/resources.hpp>
- *   #include <cuvs/cluster/kmeans.hpp>
- *   using namespace  cuvs::cluster;
- *   ...
- *   raft::resources handle;
- *   cuvs::cluster::kmeans::params params;
- *   int n_features = 15, inertia, n_iter;
- *   auto centroids = raft::make_device_matrix<float, int>(handle, params.n_clusters, n_features);
- *
- *   kmeans::fit(handle,
- *               params,
- *               X,
- *               std::nullopt,
- *               centroids,
- *               raft::make_scalar_view(&inertia),
- *               raft::make_scalar_view(&n_iter));
- * @endcode
- *
- * @param[in]     handle        The raft handle.
- * @param[in]     params        Parameters for KMeans model.
- * @param[in]     X             Training instances to cluster. The data must
- *                              be in row-major format.
- *                              [dim = n_samples x n_features]
- * @param[in]     sample_weight Optional weights for each observation in X.
- *                              [len = n_samples]
- * @param[inout]  centroids     [in] When init is InitMethod::Array, use
- *                              centroids as the initial cluster centers.
- *                              [out] The generated centroids from the
- *                              kmeans algorithm are stored at the address
- *                              pointed by 'centroids'.
- *                              [dim = n_clusters x n_features]
- * @param[out]    inertia       Sum of squared distances of samples to their
- *                              closest cluster center.
- * @param[out]    n_iter        Number of iterations run.
- */
-void fit(raft::resources const& handle,
-         const cuvs::cluster::kmeans::params& params,
-         raft::device_matrix_view<const int8_t, int> X,
-         std::optional<raft::device_vector_view<const int8_t, int>> sample_weight,
-         raft::device_matrix_view<int8_t, int> centroids,
-         raft::host_scalar_view<int8_t> inertia,
-         raft::host_scalar_view<int> n_iter);
-
-/**
  * @brief Find balanced clusters with k-means algorithm.
  *
  * @code{.cpp}
@@ -1719,6 +1669,134 @@ void cluster_cost(
   raft::device_matrix_view<const double, int64_t> centroids,
   raft::host_scalar_view<double> cost,
   std::optional<raft::device_vector_view<const double, int64_t>> sample_weight = std::nullopt);
+
+/**
+ * @brief Lloyd k-means with native byte samples and float centroids.
+ *
+ * Sample storage remains int8_t/uint8_t; there is no converted float dataset.
+ * Byte-to-byte distances accumulate in integers. Arithmetic with float centroids
+ * or weights widens only on load. Values use the original integer units.
+ * Weights and inertia are float; fitted centroids retain fractional means.
+ * These overloads are single-GPU. Host fitting uses device_buffer_samples.
+ * @param[in] handle RAFT resources
+ * @param[in] params K-means parameters
+ * @param[in] X Row-major input samples
+ * @param[in] sample_weight Optional float sample weights
+ * @param[in,out] centroids Initial/fitted float centroids
+ * @param[out] inertia Sum of squared distances to fitted centroids
+ * @param[out] n_iter Number of Lloyd iterations
+ */
+void fit(raft::resources const& handle,
+         const params& params,
+         raft::device_matrix_view<const int8_t, int64_t> X,
+         std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/** @overload */
+void fit(raft::resources const& handle,
+         const params& params,
+         raft::host_matrix_view<const int8_t, int64_t> X,
+         std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/** @overload */
+void predict(raft::resources const& handle,
+             const params& params,
+             raft::device_matrix_view<const int8_t, int64_t> X,
+             std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+             raft::device_matrix_view<const float, int64_t> centroids,
+             raft::device_vector_view<int64_t, int64_t> labels,
+             bool normalize_weight,
+             raft::host_scalar_view<float> inertia);
+
+/**
+ * @overload
+ * @param[out] X_new Row-major distances, shape [n_samples, n_clusters].
+ */
+void transform(raft::resources const& handle,
+               const params& params,
+               raft::device_matrix_view<const int8_t, int64_t> X,
+               raft::device_matrix_view<const float, int64_t> centroids,
+               raft::device_matrix_view<float, int64_t> X_new);
+
+/** @overload */
+void fit_predict(raft::resources const& handle,
+                 const params& params,
+                 raft::device_matrix_view<const int8_t, int64_t> X,
+                 std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+                 std::optional<raft::device_matrix_view<float, int64_t>> centroids,
+                 raft::device_vector_view<int64_t, int64_t> labels,
+                 raft::host_scalar_view<float> inertia,
+                 raft::host_scalar_view<int64_t> n_iter);
+
+/** @overload */
+void fit(raft::resources const& handle,
+         const params& params,
+         raft::device_matrix_view<const uint8_t, int64_t> X,
+         std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/** @overload */
+void fit(raft::resources const& handle,
+         const params& params,
+         raft::host_matrix_view<const uint8_t, int64_t> X,
+         std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+         raft::device_matrix_view<float, int64_t> centroids,
+         raft::host_scalar_view<float> inertia,
+         raft::host_scalar_view<int64_t> n_iter);
+
+/** @overload */
+void predict(raft::resources const& handle,
+             const params& params,
+             raft::device_matrix_view<const uint8_t, int64_t> X,
+             std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+             raft::device_matrix_view<const float, int64_t> centroids,
+             raft::device_vector_view<int64_t, int64_t> labels,
+             bool normalize_weight,
+             raft::host_scalar_view<float> inertia);
+
+/**
+ * @overload
+ * @param[out] X_new Row-major distances, shape [n_samples, n_clusters].
+ */
+void transform(raft::resources const& handle,
+               const params& params,
+               raft::device_matrix_view<const uint8_t, int64_t> X,
+               raft::device_matrix_view<const float, int64_t> centroids,
+               raft::device_matrix_view<float, int64_t> X_new);
+
+/** @overload */
+void fit_predict(raft::resources const& handle,
+                 const params& params,
+                 raft::device_matrix_view<const uint8_t, int64_t> X,
+                 std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+                 std::optional<raft::device_matrix_view<float, int64_t>> centroids,
+                 raft::device_vector_view<int64_t, int64_t> labels,
+                 raft::host_scalar_view<float> inertia,
+                 raft::host_scalar_view<int64_t> n_iter);
+
+/** @brief Squared L2 cost for native byte samples and float centroids. */
+void cluster_cost(
+  raft::resources const& handle,
+  raft::device_matrix_view<const int8_t, int64_t> X,
+  raft::device_matrix_view<const float, int64_t> centroids,
+  raft::host_scalar_view<float> cost,
+  std::optional<raft::device_vector_view<const float, int64_t>> sample_weight = std::nullopt);
+
+/** @brief Squared L2 cost for native byte samples and float centroids. */
+void cluster_cost(
+  raft::resources const& handle,
+  raft::device_matrix_view<const uint8_t, int64_t> X,
+  raft::device_matrix_view<const float, int64_t> centroids,
+  raft::host_scalar_view<float> cost,
+  std::optional<raft::device_vector_view<const float, int64_t>> sample_weight = std::nullopt);
+
 /**
  * @}
  */

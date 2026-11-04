@@ -66,7 +66,9 @@ def make_kernel(
     mma_rounding: bool = True,
 ):
     """Build the flat-reduction runtime-metric cuTile kernel."""
-    if data_type not in ("half", "float"):
+    if data_type in ("int8_t", "uint8_t"):
+        return make_integer_kernel(index_type, occupancy, gpu_code)
+    if data_type not in ("half", "float", "int8_float", "uint8_float"):
         raise ValueError(f"Unsupported data_type {data_type!r}")
     if metric not in METRICS:
         raise ValueError(f"Unsupported metric {metric!r}")
@@ -75,8 +77,18 @@ def make_kernel(
     if matrix_layout not in ("strict", "relaxed", "high_dim"):
         raise ValueError(f"Unsupported matrix_layout {matrix_layout!r}")
 
-    mma_dtype = ct.tfloat32 if data_type == "float" else ct.float16
-    rmode = _mma_rounding_mode(gpu_code) if mma_rounding else None
+    mma_dtype = (
+        ct.float32
+        if data_type in ("int8_float", "uint8_float")
+        else ct.tfloat32
+        if data_type == "float"
+        else ct.float16
+    )
+    rmode = (
+        _mma_rounding_mode(gpu_code)
+        if mma_rounding and data_type in ("float", "half")
+        else None
+    )
     if rmode is None:
 
         def to_mma_dtype(tile):
@@ -220,6 +232,114 @@ def make_kernel(
         )
 
     return fused_1nn_kernel
+
+
+def make_integer_kernel(index_type, occupancy, gpu_code):
+    """Build an integer-MMA top-one kernel with exact 64-bit distance ordering."""
+    idx_dtype = _idx_dtype(index_type)
+    kernel_options = {}
+    if occupancy is not None:
+        kernel_options["occupancy"] = ct.ByTarget(**{gpu_code: occupancy})
+
+    @ct.kernel(**kernel_options)
+    def fused_1nn_integer_kernel(
+        input,
+        centers,
+        input_norms,
+        center_norms,
+        output_indices,
+        output_distances,
+        rows,
+        candidates,
+        features,
+        apply_sqrt,
+        store_idx,
+        metric_code,
+        tile_m: ConstInt,
+        tile_n: ConstInt,
+        tile_k: ConstInt,
+    ):
+        row_tile = ct.bid(0)
+        best_score = ct.full((tile_m, 1), 0x7FFFFFFFFFFFFFFF, ct.int64)
+        best_index = ct.zeros((tile_m, 1), idx_dtype)
+        local_indices = ct.arange(tile_n, dtype=idx_dtype)[None, :]
+        for candidate_tile in range(ct.cdiv(candidates, tile_n)):
+            dot = ct.zeros((tile_m, tile_n), ct.int64)
+            for feature_tile in range(ct.cdiv(features, tile_k)):
+                left = ct.load(
+                    input,
+                    index=(row_tile, feature_tile),
+                    shape=(tile_m, tile_k),
+                    padding_mode=ct.PaddingMode.ZERO,
+                )
+                right = ct.load(
+                    centers,
+                    index=(feature_tile, candidate_tile),
+                    shape=(tile_k, tile_n),
+                    order=(1, 0),
+                    padding_mode=ct.PaddingMode.ZERO,
+                )
+                partial = ct.mma(
+                    left, right, ct.zeros((tile_m, tile_n), ct.int32)
+                )
+                dot = dot + partial.astype(ct.int64)
+            if metric_code == METRIC_INNER_PRODUCT:
+                scores = -dot
+            else:
+                norms = ct.load(
+                    center_norms,
+                    index=(candidate_tile,),
+                    shape=(tile_n,),
+                    padding_mode=ct.PaddingMode.ZERO,
+                )
+                scores = norms[None, :] - 2 * dot
+            indices = candidate_tile * tile_n + local_indices
+            scores = ct.where(indices < candidates, scores, 0x7FFFFFFFFFFFFFFF)
+
+            def reduce_score(left_score, left_index, right_score, right_index):
+                choose_left = (left_score < right_score) | (
+                    (left_score == right_score) & (left_index < right_index)
+                )
+                return (
+                    ct.where(choose_left, left_score, right_score),
+                    ct.where(choose_left, left_index, right_index),
+                )
+
+            score, index = ct.reduce(
+                (scores, indices),
+                1,
+                reduce_score,
+                (0x7FFFFFFFFFFFFFFF, 0x7FFFFFFF),
+                keepdims=True,
+            )
+            update = score < best_score
+            best_score = ct.where(update, score, best_score)
+            best_index = ct.where(update, index, best_index)
+
+        if metric_code == METRIC_INNER_PRODUCT:
+            distance = (-best_score).astype(ct.float32)
+        else:
+            norms = ct.load(
+                input_norms,
+                index=(row_tile,),
+                shape=(tile_m,),
+                padding_mode=ct.PaddingMode.ZERO,
+            )
+            distance = (norms[:, None] + best_score).astype(ct.float32)
+            distance = ct.where(apply_sqrt != 0, ct.sqrt(distance), distance)
+        if store_idx != 0:
+            ct.store(
+                output_indices,
+                index=(row_tile,),
+                tile=best_index.reshape((tile_m,)),
+            )
+        ct.store(
+            output_distances,
+            index=(row_tile,),
+            tile=distance.reshape((tile_m,)),
+        )
+
+    return fused_1nn_integer_kernel
 
 
 def kernel_symbol(

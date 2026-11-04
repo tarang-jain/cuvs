@@ -18,7 +18,9 @@
 #include <cuvs/cluster/kmeans.h>
 #include <cuvs/core/c_api.h>
 
+#include <array>
 #include <cstdint>
+#include <type_traits>
 
 namespace {
 
@@ -48,19 +50,25 @@ int32_t kExpectedLabels[kNSamples]                = {0, 0, 0, 0, 1, 1, 1, 1};
 // 8 points, each at squared distance 0.5 from its cluster mean -> 4.0.
 constexpr double kExpectedInertia = 4.0;
 
-void test_fit_predict()
-{
+template <typename InputT = float> void test_fit_predict() {
+  using LabelT =
+      std::conditional_t<std::is_integral_v<InputT>, int64_t, int32_t>;
+  std::array<InputT, kNSamples * kNFeatures> input;
+  std::array<LabelT, kNSamples> expected_labels;
+  for (int64_t row = 0; row < kNSamples; ++row) {
+    expected_labels[row] = kExpectedLabels[row];
+    for (int64_t feature = 0; feature < kNFeatures; ++feature) {
+      input[row * kNFeatures + feature] = kDataset[row][feature];
+    }
+  }
   raft::handle_t handle;
   auto stream = raft::resource::get_cuda_stream(handle);
 
-  rmm::device_uvector<float> dataset_d(kNSamples * kNFeatures, stream);
+  rmm::device_uvector<InputT> dataset_d(kNSamples * kNFeatures, stream);
   rmm::device_uvector<float> centroids_d(kNClusters * kNFeatures, stream);
-  rmm::device_uvector<int32_t> labels_d(kNSamples, stream);
+  rmm::device_uvector<LabelT> labels_d(kNSamples, stream);
 
-  raft::copy(dataset_d.data(),
-             reinterpret_cast<float const*>(kDataset),
-             kNSamples * kNFeatures,
-             stream);
+  raft::copy(dataset_d.data(), input.data(), kNSamples * kNFeatures, stream);
   raft::copy(centroids_d.data(),
              reinterpret_cast<float const*>(kInitCentroids),
              kNClusters * kNFeatures,
@@ -78,9 +86,9 @@ void test_fit_predict()
   params->device_buffer_samples = 0;
 
   DLManagedTensor dataset_t{};
-  cuvs::core::to_dlpack(
-    raft::make_device_matrix_view<float, int64_t>(dataset_d.data(), kNSamples, kNFeatures),
-    &dataset_t);
+  cuvs::core::to_dlpack(raft::make_device_matrix_view<InputT, int64_t>(
+                            dataset_d.data(), kNSamples, kNFeatures),
+                        &dataset_t);
 
   DLManagedTensor centroids_t{};
   cuvs::core::to_dlpack(
@@ -88,8 +96,9 @@ void test_fit_predict()
     &centroids_t);
 
   DLManagedTensor labels_t{};
-  cuvs::core::to_dlpack(
-    raft::make_device_vector_view<int32_t, int64_t>(labels_d.data(), kNSamples), &labels_t);
+  cuvs::core::to_dlpack(raft::make_device_vector_view<LabelT, int64_t>(
+                            labels_d.data(), kNSamples),
+                        &labels_t);
 
   double inertia         = -1.0;
   int n_iter             = -1;
@@ -107,8 +116,8 @@ void test_fit_predict()
                                     centroids_d.data(),
                                     kNClusters * kNFeatures,
                                     cuvs::CompareApprox<float>(1e-4f)));
-  ASSERT_TRUE(cuvs::devArrMatchHost(
-    kExpectedLabels, labels_d.data(), kNSamples, cuvs::Compare<int32_t>()));
+  ASSERT_TRUE(cuvs::devArrMatchHost(expected_labels.data(), labels_d.data(),
+                                    kNSamples, cuvs::Compare<LabelT>()));
 
   EXPECT_GT(n_iter, 0);
   EXPECT_NEAR(inertia, kExpectedInertia, 1e-4);
@@ -123,8 +132,13 @@ void test_fit_predict()
   ASSERT_EQ(cuvsResourcesDestroy(res), CUVS_SUCCESS);
 }
 
-void test_fit_host()
-{
+template <typename InputT = float> void test_fit_host() {
+  std::array<InputT, kNSamples * kNFeatures> input;
+  for (int64_t row = 0; row < kNSamples; ++row) {
+    for (int64_t feature = 0; feature < kNFeatures; ++feature) {
+      input[row * kNFeatures + feature] = kDataset[row][feature];
+    }
+  }
   raft::handle_t handle;
   auto stream = raft::resource::get_cuda_stream(handle);
 
@@ -146,10 +160,9 @@ void test_fit_host()
   params->device_buffer_samples = 4;  // force at least 2 streamed batches
 
   DLManagedTensor dataset_t{};
-  cuvs::core::to_dlpack(
-    raft::make_host_matrix_view<float, int64_t>(
-      reinterpret_cast<float*>(kDataset), kNSamples, kNFeatures),
-    &dataset_t);
+  cuvs::core::to_dlpack(raft::make_host_matrix_view<InputT, int64_t>(
+                            input.data(), kNSamples, kNFeatures),
+                        &dataset_t);
 
   DLManagedTensor centroids_t{};
   cuvs::core::to_dlpack(
@@ -192,3 +205,11 @@ TEST(KMeansC, ParamsCreateDestroy)
   EXPECT_GT(params->max_iter, 0);
   ASSERT_EQ(cuvsKMeansParamsDestroy(params), CUVS_SUCCESS);
 }
+
+TEST(KMeansC, FitPredictInt8) { test_fit_predict<int8_t>(); }
+
+TEST(KMeansC, FitPredictUint8) { test_fit_predict<uint8_t>(); }
+
+TEST(KMeansC, FitHostInt8) { test_fit_host<int8_t>(); }
+
+TEST(KMeansC, FitHostUint8) { test_fit_host<uint8_t>(); }

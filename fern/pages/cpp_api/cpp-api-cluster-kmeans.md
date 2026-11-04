@@ -305,36 +305,6 @@ raft::host_scalar_view<int64_t> n_iter);
 
 **Additional overload:** `cluster::kmeans::fit`
 
-Find clusters with k-means algorithm. Initial centroids are chosen with k-means++ algorithm. Empty clusters are reinitialized by choosing new centroids with k-means++ algorithm.
-
-```cpp
-void fit(raft::resources const& handle,
-const cuvs::cluster::kmeans::params& params,
-raft::device_matrix_view<const int8_t, int> X,
-std::optional<raft::device_vector_view<const int8_t, int>> sample_weight,
-raft::device_matrix_view<int8_t, int> centroids,
-raft::host_scalar_view<int8_t> inertia,
-raft::host_scalar_view<int> n_iter);
-```
-
-**Parameters**
-
-| Name | Direction | Type | Description |
-| --- | --- | --- | --- |
-| `handle` | in | `raft::resources const&` | The raft handle. |
-| `params` | in | [`const cuvs::cluster::kmeans::params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) | Parameters for KMeans model. |
-| `X` | in | `raft::device_matrix_view<const int8_t, int>` | Training instances to cluster. The data must be in row-major format. [dim = n_samples x n_features] |
-| `sample_weight` | in | `std::optional<raft::device_vector_view<const int8_t, int>>` | Optional weights for each observation in X. [len = n_samples] |
-| `centroids` | inout | `raft::device_matrix_view<int8_t, int>` | [in] When init is InitMethod::Array, use centroids as the initial cluster centers. [out] The generated centroids from the kmeans algorithm are stored at the address pointed by 'centroids'. [dim = n_clusters x n_features] |
-| `inertia` | out | `raft::host_scalar_view<int8_t>` | Sum of squared distances of samples to their closest cluster center. |
-| `n_iter` | out | `raft::host_scalar_view<int>` | Number of iterations run. |
-
-**Returns**
-
-`void`
-
-**Additional overload:** `cluster::kmeans::fit`
-
 Find balanced clusters with k-means algorithm.
 
 ```cpp
@@ -1064,6 +1034,344 @@ std::optional<raft::device_vector_view<const double, int64_t>> sample_weight = s
 | `centroids` | in | `raft::device_matrix_view<const double, int64_t>` | Cluster centroids. The data must be in row-major format. [dim = n_clusters x n_features] |
 | `cost` | out | `raft::host_scalar_view<double>` | Resulting cluster cost |
 | `sample_weight` | in | `std::optional<raft::device_vector_view<const double, int64_t>>` | Optional per-sample weights. [len = n_samples]<br />Default: `std::nullopt`. |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit`
+
+Lloyd k-means with native byte samples and float centroids.
+
+```cpp
+void fit(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const int8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<float, int64_t> centroids,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+Sample storage remains int8_t/uint8_t; there is no converted float dataset. Byte-to-byte distances accumulate in integers. Arithmetic with float centroids or weights widens only on load. Values use the original integer units. Weights and inertia are float; fitted centroids retain fractional means. These overloads are single-GPU. Host fitting uses device_buffer_samples.
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` | in | `raft::resources const&` | RAFT resources |
+| `params` | in | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) | K-means parameters |
+| `X` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Row-major input samples |
+| `sample_weight` | in | `std::optional<raft::device_vector_view<const float, int64_t>>` | Optional float sample weights |
+| `centroids` | in,out | `raft::device_matrix_view<float, int64_t>` | Initial/fitted float centroids |
+| `inertia` | out | `raft::host_scalar_view<float>` | Sum of squared distances to fitted centroids |
+| `n_iter` | out | `raft::host_scalar_view<int64_t>` | Number of Lloyd iterations |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit`
+
+```cpp
+void fit(raft::resources const& handle,
+const params& params,
+raft::host_matrix_view<const int8_t, int64_t> X,
+std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<float, int64_t> centroids,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::host_matrix_view<const int8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::host_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `raft::device_matrix_view<float, int64_t>` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+| `n_iter` |  | `raft::host_scalar_view<int64_t>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::predict`
+
+```cpp
+void predict(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const int8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::device_vector_view<int64_t, int64_t> labels,
+bool normalize_weight,
+raft::host_scalar_view<float> inertia);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const int8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `labels` |  | `raft::device_vector_view<int64_t, int64_t>` |  |
+| `normalize_weight` |  | `bool` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::transform`
+
+```cpp
+void transform(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const int8_t, int64_t> X,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::device_matrix_view<float, int64_t> X_new);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const int8_t, int64_t>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `X_new` | out | `raft::device_matrix_view<float, int64_t>` | Row-major distances, shape [n_samples, n_clusters]. |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit_predict`
+
+```cpp
+void fit_predict(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const int8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+std::optional<raft::device_matrix_view<float, int64_t>> centroids,
+raft::device_vector_view<int64_t, int64_t> labels,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const int8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `std::optional<raft::device_matrix_view<float, int64_t>>` |  |
+| `labels` |  | `raft::device_vector_view<int64_t, int64_t>` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+| `n_iter` |  | `raft::host_scalar_view<int64_t>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit`
+
+```cpp
+void fit(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const uint8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<float, int64_t> centroids,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `raft::device_matrix_view<float, int64_t>` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+| `n_iter` |  | `raft::host_scalar_view<int64_t>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit`
+
+```cpp
+void fit(raft::resources const& handle,
+const params& params,
+raft::host_matrix_view<const uint8_t, int64_t> X,
+std::optional<raft::host_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<float, int64_t> centroids,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::host_matrix_view<const uint8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::host_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `raft::device_matrix_view<float, int64_t>` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+| `n_iter` |  | `raft::host_scalar_view<int64_t>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::predict`
+
+```cpp
+void predict(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const uint8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::device_vector_view<int64_t, int64_t> labels,
+bool normalize_weight,
+raft::host_scalar_view<float> inertia);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `labels` |  | `raft::device_vector_view<int64_t, int64_t>` |  |
+| `normalize_weight` |  | `bool` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::transform`
+
+```cpp
+void transform(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const uint8_t, int64_t> X,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::device_matrix_view<float, int64_t> X_new);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `X_new` | out | `raft::device_matrix_view<float, int64_t>` | Row-major distances, shape [n_samples, n_clusters]. |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::fit_predict`
+
+```cpp
+void fit_predict(raft::resources const& handle,
+const params& params,
+raft::device_matrix_view<const uint8_t, int64_t> X,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight,
+std::optional<raft::device_matrix_view<float, int64_t>> centroids,
+raft::device_vector_view<int64_t, int64_t> labels,
+raft::host_scalar_view<float> inertia,
+raft::host_scalar_view<int64_t> n_iter);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `params` |  | [`const params&`](/api-reference/cpp-api-cluster-kmeans#cluster-kmeans-params) |  |
+| `X` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` |  |
+| `centroids` |  | `std::optional<raft::device_matrix_view<float, int64_t>>` |  |
+| `labels` |  | `raft::device_vector_view<int64_t, int64_t>` |  |
+| `inertia` |  | `raft::host_scalar_view<float>` |  |
+| `n_iter` |  | `raft::host_scalar_view<int64_t>` |  |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::cluster_cost`
+
+Squared L2 cost for native byte samples and float centroids.
+
+```cpp
+void cluster_cost(
+raft::resources const& handle,
+raft::device_matrix_view<const int8_t, int64_t> X,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::host_scalar_view<float> cost,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight = std::nullopt);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `X` |  | `raft::device_matrix_view<const int8_t, int64_t>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `cost` |  | `raft::host_scalar_view<float>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` | Default: `std::nullopt`. |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `cluster::kmeans::cluster_cost`
+
+Squared L2 cost for native byte samples and float centroids.
+
+```cpp
+void cluster_cost(
+raft::resources const& handle,
+raft::device_matrix_view<const uint8_t, int64_t> X,
+raft::device_matrix_view<const float, int64_t> centroids,
+raft::host_scalar_view<float> cost,
+std::optional<raft::device_vector_view<const float, int64_t>> sample_weight = std::nullopt);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `X` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `centroids` |  | `raft::device_matrix_view<const float, int64_t>` |  |
+| `cost` |  | `raft::host_scalar_view<float>` |  |
+| `sample_weight` |  | `std::optional<raft::device_vector_view<const float, int64_t>>` | Default: `std::nullopt`. |
 
 **Returns**
 

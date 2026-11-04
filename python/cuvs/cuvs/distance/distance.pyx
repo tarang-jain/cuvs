@@ -53,6 +53,9 @@ def pairwise_distance(X, Y, out=None, metric="euclidean", p=2.0,
     """
     Compute pairwise distances between X and Y
 
+    Native int8/uint8 inputs require row-major layout, return float32 distances,
+    and support squared L2, L2, and inner product without converting the datasets.
+
     Valid values for metric:
         ["euclidean", "l2", "l1", "cityblock", "inner_product",
          "chebyshev", "canberra", "lp", "hellinger", "jensenshannon",
@@ -93,7 +96,7 @@ def pairwise_distance(X, Y, out=None, metric="euclidean", p=2.0,
 
     if out is None:
         output_dtype = y_cai.dtype
-        if np.issubdtype(y_cai.dtype, np.float16):
+        if y_cai.dtype in (np.dtype('float16'), np.dtype('int8'), np.dtype('uint8')):
             output_dtype = np.float32
 
         order = "C" if getattr(X, "flags", X).c_contiguous else "F"

@@ -10,10 +10,10 @@
 
 namespace cuvs::cluster::kmeans {
 
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void fit_predict(raft::resources const& handle,
                  const kmeans::params& pams,
-                 raft::device_matrix_view<const DataT, IndexT> X,
+                 raft::device_matrix_view<const InputT, IndexT> X,
                  std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight,
                  std::optional<raft::device_matrix_view<DataT, IndexT>> centroids,
                  raft::device_vector_view<IndexT, IndexT> labels,

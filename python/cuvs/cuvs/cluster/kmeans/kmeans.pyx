@@ -250,6 +250,8 @@ def fit(
     X : array-like
         Training instances, shape (m, k).  Accepts both device arrays
         (cupy / CUDA array interface) and host arrays (numpy).
+        Supports float32, float64, int8 and uint8. Byte input stays byte-sized;
+        centroids and sample weights are float32 in the original integer units.
     centroids : Optional writable CUDA array interface compliant matrix
                 shape (n_clusters, k)
     sample_weights : Optional weights per observation.  Must reside on
@@ -331,9 +333,14 @@ def fit(
 
     x_ai = wrap_array(X)
     _check_input_array(
-        x_ai, [np.dtype('float32'), np.dtype('float64')]
+        x_ai, [np.dtype('float32'), np.dtype('float64'),
+                          np.dtype('int8'), np.dtype('uint8')]
     )
 
+    is_byte = x_ai.dtype in (np.dtype('int8'), np.dtype('uint8'))
+    math_dtype = np.dtype('float32') if is_byte else x_ai.dtype
+    if is_byte and params.hierarchical:
+        raise ValueError('Native byte input requires Lloyd k-means')
     cdef cydlpack.DLManagedTensor* x_dlpack = cydlpack.dlpack_c(x_ai)
     cdef cydlpack.DLManagedTensor* sample_weight_dlpack = NULL
 
@@ -344,14 +351,16 @@ def fit(
 
     if centroids is None:
         centroids = device_ndarray.empty(
-            (params.n_clusters, x_ai.shape[1]), dtype=x_ai.dtype
+            (params.n_clusters, x_ai.shape[1]), dtype=math_dtype
         )
 
     centroids_ai = wrap_array(centroids)
+    _check_input_array(centroids_ai, [math_dtype])
     cdef cydlpack.DLManagedTensor* centroids_dlpack = \
         cydlpack.dlpack_c(centroids_ai)
 
     if sample_weights is not None:
+        _check_input_array(wrap_array(sample_weights), [math_dtype])
         sample_weight_dlpack = \
             cydlpack.dlpack_c(wrap_array(sample_weights))
 
@@ -379,6 +388,9 @@ def predict(
 ):
     """
     Predict clusters with the k-means algorithm
+
+    For int8/uint8 input, use float32 centroids and weights. Labels are int64;
+    float input retains int32 labels.
 
     Parameters
     ----------
@@ -424,24 +436,30 @@ def predict(
     """
 
     x_ai = wrap_array(X)
-    _check_input_array(x_ai, [np.dtype('float32'), np.dtype('float64')])
+    _check_input_array(x_ai, [np.dtype('float32'), np.dtype('float64'),
+                          np.dtype('int8'), np.dtype('uint8')])
+    is_byte = x_ai.dtype in (np.dtype('int8'), np.dtype('uint8'))
+    math_dtype = np.dtype('float32') if is_byte else x_ai.dtype
+    if is_byte and params.hierarchical:
+        raise ValueError('Native byte input requires Lloyd k-means')
     cdef cydlpack.DLManagedTensor* x_dlpack = cydlpack.dlpack_c(x_ai)
 
     cdef cydlpack.DLManagedTensor* sample_weight_dlpack = NULL
     if sample_weights is not None:
+        _check_input_array(wrap_array(sample_weights), [math_dtype])
         sample_weight_dlpack = cydlpack.dlpack_c(wrap_array(sample_weights))
 
+    labels_dtype = np.dtype('int64') if is_byte else np.dtype('int32')
     if labels is None:
-        labels = device_ndarray.empty((x_ai.shape[0]), dtype='int32')
+        labels = device_ndarray.empty((x_ai.shape[0]), dtype=labels_dtype)
 
     labels_ai = wrap_array(labels)
-    _check_input_array(labels_ai, [np.dtype('int32')])
+    _check_input_array(labels_ai, [labels_dtype])
     cdef cydlpack.DLManagedTensor * labels_dlpack = \
         cydlpack.dlpack_c(labels_ai)
 
     centroids_ai = wrap_array(centroids)
-    _check_input_array(centroids_ai, [np.dtype('float32'),
-                                      np.dtype('float64')])
+    _check_input_array(centroids_ai, [math_dtype])
     cdef cydlpack.DLManagedTensor * centroids_dlpack = \
         cydlpack.dlpack_c(centroids_ai)
 
@@ -467,6 +485,8 @@ def predict(
 def cluster_cost(X, centroids, resources=None):
     """
     Compute cluster cost given an input matrix and existing centroids
+
+    For int8/uint8 input, centroids are float32 in the original integer units.
 
     Parameters
     ----------
@@ -501,12 +521,14 @@ def cluster_cost(X, centroids, resources=None):
     """
 
     x_ai = wrap_array(X)
-    _check_input_array(x_ai, [np.dtype('float32'), np.dtype('float64')])
+    _check_input_array(x_ai, [np.dtype('float32'), np.dtype('float64'),
+                          np.dtype('int8'), np.dtype('uint8')])
+    is_byte = x_ai.dtype in (np.dtype('int8'), np.dtype('uint8'))
+    math_dtype = np.dtype('float32') if is_byte else x_ai.dtype
     cdef cydlpack.DLManagedTensor* x_dlpack = cydlpack.dlpack_c(x_ai)
 
     centroids_ai = wrap_array(centroids)
-    _check_input_array(centroids_ai, [np.dtype('float32'),
-                                      np.dtype('float64')])
+    _check_input_array(centroids_ai, [math_dtype])
     cdef cydlpack.DLManagedTensor* centroids_dlpack = \
         cydlpack.dlpack_c(centroids_ai)
 

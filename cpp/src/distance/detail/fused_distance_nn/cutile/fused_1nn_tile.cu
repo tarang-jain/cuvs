@@ -33,6 +33,7 @@ namespace {
 template <typename DataT, typename IdxT>
 bool should_use_high_dim_tile(IdxT n, IdxT k, int cc_major, int cc_minor)
 {
+  if constexpr (std::is_integral_v<DataT>) { return false; }
   constexpr bool is_float = std::is_same_v<DataT, float>;
   int k_thresh            = 0;
   int n_thresh            = 0;
@@ -92,14 +93,14 @@ bool has_fused_1nn_tile_launcher()
   return planner.try_get_launcher() != nullptr;
 }
 
-template <typename DataT, typename IdxT, typename AbiTag>
+template <typename DataT, typename IdxT, typename AbiTag, typename CenterT, typename NormT>
 void launch_fused_1nn_tile_impl(raft::resources const& handle,
                                 IdxT* nearest_idx,
                                 fused_1nn_cutile_distance_t<DataT>* nearest_dist,
                                 const DataT* x,
-                                const DataT* y,
-                                const fused_1nn_cutile_norm_t<DataT>* xn,
-                                const fused_1nn_cutile_norm_t<DataT>* yn,
+                                const CenterT* y,
+                                const NormT* xn,
+                                const NormT* yn,
                                 IdxT m,
                                 IdxT n,
                                 IdxT k,
@@ -107,7 +108,7 @@ void launch_fused_1nn_tile_impl(raft::resources const& handle,
                                 bool is_sqrt)
 {
   const auto stream = raft::resource::get_cuda_stream(handle);
-  Fused1nnTilePlanner<DataT, AbiTag> planner;
+  Fused1nnTilePlanner<DataT, AbiTag, CenterT> planner;
   planner.add_entrypoint();
   auto launcher = planner.try_get_launcher();
   RAFT_EXPECTS(launcher != nullptr, "Requested cuTile fused 1-NN launcher is unavailable");
@@ -148,9 +149,9 @@ void launch_fused_1nn_tile_impl(raft::resources const& handle,
   IdxT K = k;
 
   void* x_ptr          = const_cast<DataT*>(x);
-  void* y_ptr          = const_cast<DataT*>(y);
-  void* xn_ptr         = const_cast<fused_1nn_cutile_norm_t<DataT>*>(xn);
-  void* yn_ptr         = const_cast<fused_1nn_cutile_norm_t<DataT>*>(yn);
+  void* y_ptr          = const_cast<CenterT*>(y);
+  void* xn_ptr         = const_cast<NormT*>(xn);
+  void* yn_ptr         = const_cast<NormT*>(yn);
   const IdxT store_idx = nearest_idx != nullptr ? IdxT{1} : IdxT{0};
   void* idx_ptr        = nearest_idx;
   void* dist_ptr       = nearest_dist;
@@ -295,6 +296,9 @@ bool is_fused_1nn_tile_available(
   static_assert(std::is_same_v<IdxT, int> || std::is_same_v<IdxT, int64_t>);
 
   if (x == nullptr || y == nullptr || m <= 0 || n <= 0 || k <= 0) { return false; }
+  if constexpr (std::is_integral_v<DataT>) {
+    if (metric == cuvs::distance::DistanceType::CosineExpanded) { return false; }
+  }
   if (metric != cuvs::distance::DistanceType::InnerProduct &&
       metric != cuvs::distance::DistanceType::L2Expanded &&
       metric != cuvs::distance::DistanceType::L2SqrtExpanded &&
@@ -432,6 +436,10 @@ CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(float, int);
 CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(float, int64_t);
 CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(half, int);
 CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(half, int64_t);
+CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(int8_t, int);
+CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(int8_t, int64_t);
+CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(uint8_t, int);
+CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE(uint8_t, int64_t);
 
 #undef CUVS_INST_IS_FUSED_1NN_TILE_AVAILABLE
 
@@ -455,8 +463,77 @@ CUVS_INST_LAUNCH_FUSED_1NN_TILE(float, int);
 CUVS_INST_LAUNCH_FUSED_1NN_TILE(float, int64_t);
 CUVS_INST_LAUNCH_FUSED_1NN_TILE(half, int);
 CUVS_INST_LAUNCH_FUSED_1NN_TILE(half, int64_t);
+CUVS_INST_LAUNCH_FUSED_1NN_TILE(int8_t, int);
+CUVS_INST_LAUNCH_FUSED_1NN_TILE(int8_t, int64_t);
+CUVS_INST_LAUNCH_FUSED_1NN_TILE(uint8_t, int);
+CUVS_INST_LAUNCH_FUSED_1NN_TILE(uint8_t, int64_t);
 
 #undef CUVS_INST_LAUNCH_FUSED_1NN_TILE
+
+template <typename DataT>
+bool try_fused_1nn_mixed_tile(raft::resources const& handle,
+                              int* indices,
+                              float* distances,
+                              const DataT* input,
+                              const float* centers,
+                              const float* input_norms,
+                              const float* center_norms,
+                              int rows,
+                              int candidates,
+                              int features,
+                              bool take_sqrt)
+{
+  if (!cuvs::detail::jit_lto::cutile_launch_available_on_current_device() || rows <= 0 ||
+      candidates <= 0 || features <= 0 || !is_16_byte_aligned(input) ||
+      !is_16_byte_aligned(centers) || !is_16_byte_aligned(input_norms) ||
+      !is_16_byte_aligned(center_norms) || !is_16_byte_aligned(indices) ||
+      !is_16_byte_aligned(distances)) {
+    return false;
+  }
+  auto launch = [&]<typename AbiTag>() {
+    Fused1nnTilePlanner<DataT, AbiTag, float> planner;
+    planner.add_entrypoint();
+    if (planner.try_get_launcher() == nullptr) { return false; }
+    launch_fused_1nn_tile_impl<DataT, int, AbiTag>(handle,
+                                                   indices,
+                                                   distances,
+                                                   input,
+                                                   centers,
+                                                   input_norms,
+                                                   center_norms,
+                                                   rows,
+                                                   candidates,
+                                                   features,
+                                                   DistanceType::L2Expanded,
+                                                   take_sqrt);
+    return true;
+  };
+  return features % 16 == 0 ? launch.template operator()<cutile_abi_strict>()
+                            : launch.template operator()<cutile_abi_relaxed>();
+}
+
+template CUVS_EXPORT bool try_fused_1nn_mixed_tile<int8_t>(raft::resources const&,
+                                                           int*,
+                                                           float*,
+                                                           const int8_t*,
+                                                           const float*,
+                                                           const float*,
+                                                           const float*,
+                                                           int,
+                                                           int,
+                                                           int,
+                                                           bool);
+template CUVS_EXPORT bool try_fused_1nn_mixed_tile<uint8_t>(raft::resources const&,
+                                                            int*,
+                                                            float*,
+                                                            const uint8_t*,
+                                                            const float*,
+                                                            const float*,
+                                                            const float*,
+                                                            int,
+                                                            int,
+                                                            int,
+                                                            bool);
 
 }  // namespace detail
 }  // namespace distance

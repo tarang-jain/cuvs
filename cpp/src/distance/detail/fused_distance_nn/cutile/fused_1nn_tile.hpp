@@ -23,14 +23,15 @@ namespace detail {
 
 template <typename DataT>
 inline constexpr bool is_fused_1nn_cutile_data_v =
-  std::is_same_v<DataT, float> || std::is_same_v<DataT, half>;
+  std::is_same_v<DataT, float> || std::is_same_v<DataT, half> || std::is_same_v<DataT, int8_t> ||
+  std::is_same_v<DataT, uint8_t>;
 
-// Norm buffers use FP32 storage. Accumulate FP16 norms in FP32; for FP32 inputs, accumulate
-// the squares of TF32-rounded values in FP32 to match the cuTile MMA operands.
+// Norm buffers use int64 for byte inputs and FP32 otherwise; FP16 norms accumulate in FP32.
+// For FP32 inputs, accumulate TF32-rounded squares in FP32 to match cuTile MMA operands.
 template <typename DataT>
-using fused_1nn_cutile_norm_t = float;
+using fused_1nn_cutile_norm_t = std::conditional_t<std::is_integral_v<DataT>, int64_t, float>;
 
-// Both FP16 and FP32 MMA paths accumulate and reconstruct distances in FP32.
+// Distance outputs use FP32; integer reductions stay int64 until the final store.
 template <typename DataT>
 using fused_1nn_cutile_distance_t = float;
 
@@ -82,6 +83,19 @@ void launch_fused_1nn_tile(raft::resources const& handle,
                            cuvs::distance::DistanceType metric,
                            bool is_sqrt,
                            void* index_workspace);
+template <typename DataT>
+bool try_fused_1nn_mixed_tile(raft::resources const& handle,
+                              int* indices,
+                              float* distances,
+                              const DataT* input,
+                              const float* centers,
+                              const float* input_norms,
+                              const float* center_norms,
+                              int rows,
+                              int candidates,
+                              int features,
+                              bool take_sqrt);
+
 }  // namespace detail
 }  // namespace distance
 }  // namespace cuvs

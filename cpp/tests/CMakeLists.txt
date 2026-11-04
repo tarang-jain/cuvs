@@ -133,6 +133,7 @@ ConfigureTest(
 ConfigureTest(
   NAME CLUSTER_TEST
   PATH cluster/kmeans.cu
+       cluster/kmeans_byte.cu
        cluster/cluster_cost.cu
        cluster/kmeans_balanced.cu
        cluster/kmeans_find_k.cu
@@ -452,6 +453,7 @@ endif()
 ConfigureTest(
   NAME DISTANCE_TEST
   PATH distance/dist_canberra.cu
+       distance/byte_distance.cu
        distance/dist_correlation.cu
        distance/dist_cos.cu
        distance/dist_hamming.cu

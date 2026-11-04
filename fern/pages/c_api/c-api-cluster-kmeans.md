@@ -150,6 +150,8 @@ X may reside on either host (CPU) or device (GPU) memory. When X is on the host 
 
 A memory pool is optional but recommended, especially for repeated fits:
 
+Native int8/uint8 Lloyd input uses float32 centroids and sample weights in the original integer units. Samples are never materialized as a float dataset.
+
 **Parameters**
 
 | Name | Direction | Type | Description |
@@ -182,6 +184,8 @@ bool normalize_weight,
 double* inertia);
 ```
 
+For int8/uint8 input, centroids and weights are float32 and labels are int64.
+
 **Parameters**
 
 | Name | Direction | Type | Description |
@@ -202,7 +206,7 @@ double* inertia);
 <a id="cuvskmeansclustercost"></a>
 ### cuvsKMeansClusterCost
 
-Compute cluster cost
+Compute cluster cost Native int8/uint8 input requires float32 centroids in the original units.
 
 ```c
 cuvsError_t cuvsKMeansClusterCost(cuvsResources_t res,

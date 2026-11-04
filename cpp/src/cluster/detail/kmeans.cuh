@@ -7,6 +7,7 @@
 #include "../../core/nvtx.hpp"
 #include "../../neighbors/detail/ann_utils.cuh"
 #include "kmeans_batch_loader.cuh"
+#include "kmeans_byte_init.cuh"
 #include "kmeans_common.cuh"
 
 #include <cuvs/cluster/kmeans.hpp>
@@ -58,10 +59,10 @@ namespace cuvs::cluster::kmeans::detail {
 
 static const std::string CUVS_NAME = "cuvs";
 
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void cluster_cost(
   raft::resources const& handle,
-  raft::device_matrix_view<const DataT, IndexT> X,
+  raft::device_matrix_view<const InputT, IndexT> X,
   raft::device_matrix_view<const DataT, IndexT> centroids,
   raft::device_scalar_view<DataT> cost,
   raft::device_vector_view<const DataT, IndexT> norms,
@@ -341,19 +342,6 @@ void kmeansPlusPlus(raft::resources const& handle,
     RAFT_LOG_DEBUG(" k-means++ - Sampled %d/%d centroids", n_clusters_picked, n_clusters);
   }  /// <<<< Step-5 >>>
 }
-
-template <typename DataT, typename IndexT, typename Accessor>
-void kmeans_fit(
-  raft::resources const& handle,
-  const cuvs::cluster::kmeans::params& pams,
-  raft::mdspan<const DataT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
-  std::optional<
-    raft::mdspan<const DataT, raft::vector_extent<IndexT>, raft::layout_right, Accessor>>
-    sample_weight,
-  raft::device_matrix_view<DataT, IndexT> centroids,
-  raft::host_scalar_view<DataT> inertia,
-  raft::host_scalar_view<IndexT> n_iter,
-  std::optional<std::reference_wrapper<rmm::device_uvector<char>>> workspace = std::nullopt);
 
 /*
  * @brief Selects 'n_clusters' samples from X using scalable kmeans++ algorithm.
@@ -678,14 +666,16 @@ void initScalableKMeansPlusPlus(raft::resources const& handle,
  * @param[out]    n_iter        Number of iterations run for the best
  *                              initialization.
  */
-template <typename DataT, typename IndexT, typename Accessor>
+template <typename DataT, typename IndexT, typename Accessor, typename InputT>
 void kmeans_fit(
   raft::resources const& handle,
   const cuvs::cluster::kmeans::params& pams,
-  raft::mdspan<const DataT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
-  std::optional<
-    raft::mdspan<const DataT, raft::vector_extent<IndexT>, raft::layout_right, Accessor>>
-    sample_weight,
+  raft::mdspan<const InputT, raft::matrix_extent<IndexT>, raft::row_major, Accessor> X,
+  std::optional<raft::mdspan<const DataT,
+                             raft::vector_extent<IndexT>,
+                             raft::layout_right,
+                             raft::host_device_accessor<cuda::std::default_accessor<const DataT>,
+                                                        Accessor::mem_type>>> sample_weight,
   raft::device_matrix_view<DataT, IndexT> centroids,
   raft::host_scalar_view<DataT> inertia,
   raft::host_scalar_view<IndexT> n_iter,
@@ -704,6 +694,10 @@ void kmeans_fit(
   if (sample_weight.has_value())
     RAFT_EXPECTS(sample_weight.value().extent(0) == n_samples,
                  "invalid parameter (sample_weight!=n_samples)");
+  if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+    RAFT_EXPECTS(n_samples >= n_clusters && n_features > 0 && pams.max_iter >= 0 && pams.n_init > 0,
+                 "Invalid byte k-means dimensions or iteration count");
+  }
   RAFT_EXPECTS(n_clusters > 0, "invalid parameter (n_clusters<=0)");
   RAFT_EXPECTS(pams.tol > 0, "invalid parameter (tol<=0)");
   RAFT_EXPECTS(pams.oversampling_factor >= 0, "invalid parameter (oversampling_factor<0)");
@@ -742,9 +736,13 @@ void kmeans_fit(
   }
 
   // Preallocate the host-side KMeans++ init sample buffer.
-  std::optional<raft::device_matrix<DataT, IndexT>> init_sample;
+  std::optional<raft::device_matrix<InputT, IndexT>> init_sample;
   if constexpr (!data_on_device) {
     if (pams.init == cuvs::cluster::kmeans::params::InitMethod::KMeansPlusPlus) {
+      if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+        RAFT_EXPECTS(pams.init_size <= 0 || pams.init_size >= n_clusters,
+                     "Byte k-means init_size must cover n_clusters");
+      }
       IndexT default_init_size =
         std::min(static_cast<IndexT>(std::int64_t{3} * n_clusters), n_samples);
       IndexT init_sample_size = pams.init_size > 0
@@ -760,7 +758,7 @@ void kmeans_fit(
           static_cast<size_t>(n_samples));
       }
 
-      init_sample = raft::make_device_matrix<DataT, IndexT>(handle, init_sample_size, n_features);
+      init_sample = raft::make_device_matrix<InputT, IndexT>(handle, init_sample_size, n_features);
     }
   }
 
@@ -774,14 +772,28 @@ void kmeans_fit(
     raft::random::RngState random_state(iter_params.rng_state.seed);
 
     if (iter_params.init == cuvs::cluster::kmeans::params::InitMethod::Random) {
-      raft::matrix::sample_rows(handle, random_state, X, centroidsRawData);
+      if constexpr (std::is_same_v<InputT, DataT>) {
+        raft::matrix::sample_rows(handle, random_state, X, centroidsRawData);
+      } else {
+        auto selected = raft::make_device_matrix<InputT, IndexT>(handle, n_clusters, n_features);
+        raft::matrix::sample_rows(handle, random_state, X, selected.view());
+        raft::linalg::unaryOp(centroidsRawData.data_handle(),
+                              selected.data_handle(),
+                              selected.size(),
+                              raft::cast_op<DataT>{},
+                              stream);
+      }
     } else if (iter_params.init == cuvs::cluster::kmeans::params::InitMethod::KMeansPlusPlus) {
-      auto run_kmeanspp = [&](raft::device_matrix_view<const DataT, IndexT> init_data) {
-        if (iter_params.oversampling_factor == 0)
-          kmeansPlusPlus<DataT, IndexT>(handle, iter_params, init_data, centroidsRawData, ws);
-        else
-          initScalableKMeansPlusPlus<DataT, IndexT>(
-            handle, iter_params, init_data, centroidsRawData, ws);
+      auto run_kmeanspp = [&](raft::device_matrix_view<const InputT, IndexT> init_data) {
+        if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+          init_byte_centroids(handle, iter_params, init_data, centroidsRawData, ws);
+        } else {
+          if (iter_params.oversampling_factor == 0)
+            kmeansPlusPlus<DataT, IndexT>(handle, iter_params, init_data, centroidsRawData, ws);
+          else
+            initScalableKMeansPlusPlus<DataT, IndexT>(
+              handle, iter_params, init_data, centroidsRawData, ws);
+        }
       };
 
       if constexpr (data_on_device) {
@@ -826,12 +838,12 @@ void kmeans_fit(
     cuvs::spatial::knn::detail::utils::get_prefetch_stream(handle);
   const std::size_t recycle_offset = enable_prefetch ? 2 : 1;
 
-  kmeans_batch_loader<DataT, IndexT, data_on_device> data_batches(
+  kmeans_batch_loader<InputT, IndexT, data_on_device> data_batches(
     handle, X, device_buffer_samples, batch_copy_stream, batch_mr, enable_prefetch);
   const IndexT l2_norm_size = data_on_device ? n_samples : device_buffer_samples;
   auto L2NormBatch          = raft::make_device_vector<DataT, IndexT>(handle, l2_norm_size);
   auto Tf32NormBatch        = raft::make_device_vector<DataT, IndexT>(
-    handle, kmeans_may_require_tf32_norms_v<DataT> ? l2_norm_size : IndexT{0});
+    handle, kmeans_may_require_tf32_norms_v<InputT> ? l2_norm_size : IndexT{0});
   // Host-path weight batches: only materialized when weights are provided and
   // the data resides on host
   std::optional<kmeans_batch_loader<DataT, IndexT, false>> weight_batches;
@@ -909,8 +921,8 @@ void kmeans_fit(
   bool need_compute_norms = metric == cuvs::distance::DistanceType::L2Expanded ||
                             metric == cuvs::distance::DistanceType::L2SqrtExpanded;
   auto assignment_uses_tf32 =
-    [&](const DataT* batch_ptr, IndexT batch_size, const DataT* centroid_ptr) {
-      if constexpr (kmeans_may_require_tf32_norms_v<DataT>) {
+    [&](const InputT* batch_ptr, IndexT batch_size, const DataT* centroid_ptr) {
+      if constexpr (kmeans_may_require_tf32_norms_v<InputT>) {
         const auto plan = probe_kmeans_top_1_nn(handle,
                                                 batch_ptr,
                                                 centroid_ptr,
@@ -926,12 +938,14 @@ void kmeans_fit(
         return false;
       }
     };
-  auto compute_batch_norms = [&](const DataT* batch_ptr, IndexT batch_size, bool use_tf32_norms) {
+  auto compute_batch_norms = [&](const InputT* batch_ptr, IndexT batch_size, bool use_tf32_norms) {
     auto batch_view =
-      raft::make_device_matrix_view<const DataT, IndexT>(batch_ptr, batch_size, n_features);
+      raft::make_device_matrix_view<const InputT, IndexT>(batch_ptr, batch_size, n_features);
     auto norm_view =
       raft::make_device_vector_view<DataT, IndexT>(L2NormBatch.data_handle(), batch_size);
-    if constexpr (kmeans_may_require_tf32_norms_v<DataT>) {
+    if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+      cuvs::distance::detail::byte_norm(handle, batch_view, norm_view);
+    } else if constexpr (kmeans_may_require_tf32_norms_v<InputT>) {
       if (use_tf32_norms) {
         auto tf32_norm_view =
           raft::make_device_vector_view<float, IndexT>(Tf32NormBatch.data_handle(), batch_size);
@@ -1015,7 +1029,7 @@ void kmeans_fit(
         IndexT cur_batch_size = static_cast<IndexT>(data_batch.size());
         const DataT* wt_data  = weight_batch.has_value() ? weight_batch->data() : nullptr;
 
-        auto batch_data_view = raft::make_device_matrix_view<const DataT, IndexT>(
+        auto batch_data_view = raft::make_device_matrix_view<const InputT, IndexT>(
           data_batch.data(), cur_batch_size, n_features);
         auto batch_weights_view =
           cur_batch_weights(static_cast<IndexT>(data_batch.offset()), wt_data, cur_batch_size);
@@ -1040,7 +1054,7 @@ void kmeans_fit(
         auto l2_const_view = raft::make_device_vector_view<const DataT, IndexT>(
           L2NormBatch.data_handle() + l2_norm_offset, cur_batch_size);
         std::optional<raft::device_vector_view<const DataT, IndexT>> tf32_const_view = std::nullopt;
-        if constexpr (kmeans_may_require_tf32_norms_v<DataT>) {
+        if constexpr (kmeans_may_require_tf32_norms_v<InputT>) {
           if (batch_uses_tf32) {
             tf32_const_view = raft::make_device_vector_view<const DataT, IndexT>(
               Tf32NormBatch.data_handle() + l2_norm_offset, cur_batch_size);
@@ -1126,7 +1140,7 @@ void kmeans_fit(
         IndexT cur_batch_size = static_cast<IndexT>(data_batch.size());
         const DataT* wt_data  = weight_batch.has_value() ? weight_batch->data() : nullptr;
 
-        auto batch_data_view = raft::make_device_matrix_view<const DataT, IndexT>(
+        auto batch_data_view = raft::make_device_matrix_view<const InputT, IndexT>(
           data_batch.data(), cur_batch_size, n_features);
         if constexpr (!data_on_device) {
           if (need_compute_norms) { compute_batch_norms(data_batch.data(), cur_batch_size, false); }
@@ -1227,10 +1241,10 @@ void fit(raft::resources const& handle,
   kmeans_fit(handle, params, X, sample_weight, centroids, inertia, n_iter);
 }
 
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void kmeans_predict(raft::resources const& handle,
                     const cuvs::cluster::kmeans::params& pams,
-                    raft::device_matrix_view<const DataT, IndexT> X,
+                    raft::device_matrix_view<const InputT, IndexT> X,
                     std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight,
                     raft::device_matrix_view<const DataT, IndexT> centroids,
                     raft::device_vector_view<IndexT, IndexT> labels,
@@ -1257,6 +1271,9 @@ void kmeans_predict(raft::resources const& handle,
                "invalid parameter (centroids.extent(1) != n_features)");
 
   raft::default_logger().set_level(pams.verbosity);
+  if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+    RAFT_EXPECTS(labels.extent(0) == n_samples, "Byte k-means labels size mismatch");
+  }
   auto metric = pams.metric;
 
   // Allocate memory
@@ -1286,14 +1303,16 @@ void kmeans_predict(raft::resources const& handle,
 
   auto L2NormX   = raft::make_device_vector<DataT, IndexT>(handle, n_samples);
   auto Tf32NormX = raft::make_device_vector<DataT, IndexT>(
-    handle, kmeans_may_require_tf32_norms_v<DataT> ? n_samples : IndexT{0});
+    handle, kmeans_may_require_tf32_norms_v<InputT> ? n_samples : IndexT{0});
   std::optional<raft::device_vector_view<const DataT, IndexT>> tf32_normx_view = std::nullopt;
   const bool needs_norms = metric == cuvs::distance::DistanceType::L2Expanded ||
                            metric == cuvs::distance::DistanceType::L2SqrtExpanded ||
                            metric == cuvs::distance::DistanceType::CosineExpanded;
   if (needs_norms) {
     bool use_tf32_norms = false;
-    if constexpr (kmeans_may_require_tf32_norms_v<DataT>) {
+    if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+      cuvs::distance::detail::byte_norm(handle, X, L2NormX.view());
+    } else if constexpr (kmeans_may_require_tf32_norms_v<InputT>) {
       const auto plan = probe_kmeans_top_1_nn(handle,
                                               X.data_handle(),
                                               centroids.data_handle(),
@@ -1393,10 +1412,10 @@ void kmeans_predict(raft::resources const& handle,
  * @param[in]     centroids     Cluster centroids. The data must be in row-major format.
  * @param[out]    X_new         X transformed in the new space..
  */
-template <typename DataT, typename IndexT = int>
+template <typename DataT, typename IndexT = int, typename InputT = DataT>
 void kmeans_transform(raft::resources const& handle,
                       const cuvs::cluster::kmeans::params& pams,
-                      raft::device_matrix_view<const DataT, IndexT> X,
+                      raft::device_matrix_view<const InputT, IndexT> X,
                       raft::device_matrix_view<const DataT, IndexT> centroids,
                       raft::device_matrix_view<DataT, IndexT> X_new)
 {
@@ -1411,6 +1430,12 @@ void kmeans_transform(raft::resources const& handle,
   auto n_clusters     = pams.n_clusters;
   auto metric         = pams.metric;
 
+  if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+    RAFT_EXPECTS(centroids.extent(0) == n_clusters && centroids.extent(1) == n_features &&
+                   X_new.extent(0) == n_samples && X_new.extent(1) == n_clusters,
+                 "Byte k-means transform shape mismatch");
+  }
+
   // Device-accessible allocation of expandable storage used as temporary buffers
   rmm::device_uvector<char> workspace(0, stream);
   auto dataBatchSize = getDataBatchSize(pams.batch_samples, n_samples);
@@ -1423,7 +1448,7 @@ void kmeans_transform(raft::resources const& handle,
 
     // datasetView [ns x n_features] - view representing the current batch of
     // input dataset
-    auto datasetView = raft::make_device_matrix_view<const DataT, IndexT>(
+    auto datasetView = raft::make_device_matrix_view<const InputT, IndexT>(
       X.data_handle() + n_features * dIdx, ns, n_features);
 
     // pairwiseDistanceView [ns x n_clusters]
@@ -1432,8 +1457,13 @@ void kmeans_transform(raft::resources const& handle,
 
     // calculate pairwise distance between cluster centroids and current batch
     // of input dataset
-    pairwise_distance_kmeans<DataT, IndexT>(
-      handle, datasetView, centroids, pairwiseDistanceView, metric);
+    if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+      cuvs::distance::detail::byte_pairwise_distance(
+        handle, datasetView, centroids, pairwiseDistanceView, metric);
+    } else {
+      pairwise_distance_kmeans<DataT, IndexT>(
+        handle, datasetView, centroids, pairwiseDistanceView, metric);
+    }
   }
 }
 }  // namespace cuvs::cluster::kmeans::detail

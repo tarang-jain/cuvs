@@ -289,9 +289,9 @@ void cluster_cost(raft::resources const& handle,
  * @param[in]  accurate_distances   Computed distance will have DataT-accurate precision.
  *
  */
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void min_cluster_distance(raft::resources const& handle,
-                          raft::device_matrix_view<const DataT, IndexT> X,
+                          raft::device_matrix_view<const InputT, IndexT> X,
                           raft::device_matrix_view<DataT, IndexT> centroids,
                           raft::device_vector_view<DataT, IndexT> minClusterDistance,
                           raft::device_vector_view<DataT, IndexT> L2NormX,
@@ -328,10 +328,10 @@ void min_cluster_distance(raft::resources const& handle,
  * @param[out] cost           Sum of squared distances to nearest centroid (device)
  * @param[in]  sample_weight  Optional per-sample weights [n_samples]
  */
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void cluster_cost(
   raft::resources const& handle,
-  raft::device_matrix_view<const DataT, IndexT> X,
+  raft::device_matrix_view<const InputT, IndexT> X,
   raft::device_matrix_view<const DataT, IndexT> centroids,
   raft::device_scalar_view<DataT> cost,
   std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight = std::nullopt)
@@ -345,7 +345,11 @@ void cluster_cost(
   rmm::device_uvector<char> workspace(n_samples * sizeof(IndexT), stream);
 
   auto x_norms = raft::make_device_vector<DataT>(handle, n_samples);
-  raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(handle, X, x_norms.view());
+  if constexpr (cuvs::distance::detail::is_byte_distance_v<InputT>) {
+    cuvs::distance::detail::byte_norm(handle, X, x_norms.view());
+  } else {
+    raft::linalg::norm<raft::linalg::L2Norm, raft::Apply::ALONG_ROWS>(handle, X, x_norms.view());
+  }
 
   auto min_cluster_distance = raft::make_device_vector<DataT>(handle, n_samples);
   rmm::device_uvector<DataT> l2_norm_or_distance_buffer(0, stream);
@@ -392,10 +396,10 @@ void cluster_cost(
  * @param[out] cost           Sum of squared distances to nearest centroid (host)
  * @param[in]  sample_weight  Optional per-sample weights [n_samples]
  */
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void cluster_cost(
   raft::resources const& handle,
-  raft::device_matrix_view<const DataT, IndexT> X,
+  raft::device_matrix_view<const InputT, IndexT> X,
   raft::device_matrix_view<const DataT, IndexT> centroids,
   raft::host_scalar_view<DataT> cost,
   std::optional<raft::device_vector_view<const DataT, IndexT>> sample_weight = std::nullopt)

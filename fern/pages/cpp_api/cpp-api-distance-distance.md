@@ -384,3 +384,59 @@ float metric_arg = 2.0f);
 **Returns**
 
 `void`
+
+**Additional overload:** `distance::pairwise_distance`
+
+Compute distances directly from byte-valued row-major matrices.
+
+```cpp
+void pairwise_distance(raft::resources const& handle,
+raft::device_matrix_view<const int8_t, int64_t> x,
+raft::device_matrix_view<const int8_t, int64_t> y,
+raft::device_matrix_view<float, int64_t> dist,
+cuvs::distance::DistanceType metric,
+float metric_arg = 2.0f);
+```
+
+Supports L2 (expanded/unexpanded, with optional square root) and inner product. Integer accumulation is widened before conversion to float output; inputs are used in their original units, without normalization or a float input buffer.
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` | in | `raft::resources const&` | RAFT resources |
+| `x` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Input rows |
+| `y` | in | `raft::device_matrix_view<const int8_t, int64_t>` | Candidate rows with the same feature count |
+| `dist` | out | `raft::device_matrix_view<float, int64_t>` | Pairwise distances, shaped [x rows, y rows] |
+| `metric` | in | [`cuvs::distance::DistanceType`](/api-reference/cpp-api-distance-distance#distance-distancetype) | Distance metric |
+| `metric_arg` |  | `float` | Default: `2.0f`. |
+
+**Returns**
+
+`void`
+
+**Additional overload:** `distance::pairwise_distance`
+
+```cpp
+void pairwise_distance(raft::resources const& handle,
+raft::device_matrix_view<const uint8_t, int64_t> x,
+raft::device_matrix_view<const uint8_t, int64_t> y,
+raft::device_matrix_view<float, int64_t> dist,
+cuvs::distance::DistanceType metric,
+float metric_arg = 2.0f);
+```
+
+**Parameters**
+
+| Name | Direction | Type | Description |
+| --- | --- | --- | --- |
+| `handle` |  | `raft::resources const&` |  |
+| `x` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `y` |  | `raft::device_matrix_view<const uint8_t, int64_t>` |  |
+| `dist` |  | `raft::device_matrix_view<float, int64_t>` |  |
+| `metric` |  | [`cuvs::distance::DistanceType`](/api-reference/cpp-api-distance-distance#distance-distancetype) |  |
+| `metric_arg` |  | `float` | Default: `2.0f`. |
+
+**Returns**
+
+`void`

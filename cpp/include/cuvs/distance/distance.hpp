@@ -465,6 +465,33 @@ void pairwise_distance(raft::resources const& handle,
                        cuvs::distance::DistanceType metric,
                        float metric_arg = 2.0f);
 
+/**
+ * @brief Compute distances directly from byte-valued row-major matrices.
+ *
+ * Supports L2 (expanded/unexpanded, with optional square root) and inner product.
+ * Integer accumulation is widened before conversion to float output; inputs are
+ * used in their original units, without normalization or a float input buffer.
+ * @param[in] handle RAFT resources
+ * @param[in] x Input rows
+ * @param[in] y Candidate rows with the same feature count
+ * @param[out] dist Pairwise distances, shaped [x rows, y rows]
+ * @param[in] metric Distance metric
+ */
+void pairwise_distance(raft::resources const& handle,
+                       raft::device_matrix_view<const int8_t, int64_t> x,
+                       raft::device_matrix_view<const int8_t, int64_t> y,
+                       raft::device_matrix_view<float, int64_t> dist,
+                       cuvs::distance::DistanceType metric,
+                       float metric_arg = 2.0f);
+
+/** @overload */
+void pairwise_distance(raft::resources const& handle,
+                       raft::device_matrix_view<const uint8_t, int64_t> x,
+                       raft::device_matrix_view<const uint8_t, int64_t> y,
+                       raft::device_matrix_view<float, int64_t> dist,
+                       cuvs::distance::DistanceType metric,
+                       float metric_arg = 2.0f);
+
 /** @} */  // end group pairwise_distance_runtime
 
 }  // namespace distance

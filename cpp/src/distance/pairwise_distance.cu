@@ -8,6 +8,8 @@
 #include <cuvs/distance/distance.hpp>
 #include <raft/core/device_mdspan.hpp>
 
+#include "detail/byte_distance.cuh"
+
 namespace cuvs::distance {
 
 /**
@@ -120,6 +122,26 @@ void pairwise_distance(
     dist.data_handle(), dist.extent(0), dist.extent(1));
   pairwise_distance<half, raft::layout_f_contiguous, int, float>(
     handle, x_v, y_v, d_v, metric, metric_arg);
+}
+
+void pairwise_distance(raft::resources const& handle,
+                       raft::device_matrix_view<const int8_t, int64_t> x,
+                       raft::device_matrix_view<const int8_t, int64_t> y,
+                       raft::device_matrix_view<float, int64_t> dist,
+                       cuvs::distance::DistanceType metric,
+                       float)
+{
+  detail::byte_pairwise_distance(handle, x, y, dist, metric);
+}
+
+void pairwise_distance(raft::resources const& handle,
+                       raft::device_matrix_view<const uint8_t, int64_t> x,
+                       raft::device_matrix_view<const uint8_t, int64_t> y,
+                       raft::device_matrix_view<float, int64_t> dist,
+                       cuvs::distance::DistanceType metric,
+                       float)
+{
+  detail::byte_pairwise_distance(handle, x, y, dist, metric);
 }
 
 /** @} */  // end group pairwise_distance_runtime

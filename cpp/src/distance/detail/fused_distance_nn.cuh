@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "byte_distance.cuh"
+
 #include "distance_ops/l2_exp.cuh"  // ops::l2_exp_distance_op
 #if CUVS_CUTILE_ENABLED
 #include "fused_distance_nn/cutile/fused_1nn_tile.hpp"
@@ -148,7 +150,10 @@ bool is_top_1_nn_backend_available(Top1nnBackend backend,
   }
   constexpr bool is_legacy_data_type =
     std::is_same_v<DataT, float> || std::is_same_v<DataT, double>;
-  if (backend == Top1nnBackend::Unfused) { return is_legacy_data_type; }
+  if (backend == Top1nnBackend::Unfused) {
+    return is_legacy_data_type ||
+           (is_byte_distance_v<DataT> && metric != DistanceType::CosineExpanded);
+  }
   return backend == Top1nnBackend::Cutlass && is_legacy_data_type;
 }
 

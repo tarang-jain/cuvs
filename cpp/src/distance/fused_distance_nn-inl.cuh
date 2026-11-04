@@ -560,71 +560,77 @@ void top_1_nn_unfused(raft::resources const& handle,
                                     std::is_same_v<OutputT, typename OutputTypes::scalar>;
   constexpr bool matching_norm_type = std::is_same_v<NormT, DataT>;
 
-  RAFT_EXPECTS(metric != cuvs::distance::DistanceType::InnerProduct,
-               "Unfused top_1_nn does not support InnerProduct");
-  RAFT_EXPECTS(matching_norm_type, "Unfused top_1_nn requires matching norm types");
-
-  if constexpr (matching_norm_type && is_native_output) {
-    RAFT_EXPECTS(output != nullptr, "Unfused top_1_nn requires a native output buffer");
-    const auto layout = make_unfused_top_1_nn_workspace_layout<DataT>(m, n, tuning);
-    RAFT_EXPECTS(layout.total_bytes == 0 || workspace != nullptr,
-                 "Unfused top_1_nn requires a workspace buffer");
-    RAFT_EXPECTS(workspace_bytes >= layout.total_bytes,
-                 "Unfused top_1_nn workspace is smaller than its configured tile");
-
-    const auto row_tile       = layout.row_tile;
-    const auto candidate_tile = layout.candidate_tile;
-    auto* candidate_min =
-      layout.candidate_bytes == 0
-        ? nullptr
-        : reinterpret_cast<NativeOutputT*>(static_cast<char*>(workspace) + layout.candidate_offset);
-    for (IdxT row_offset = 0; row_offset < m;) {
-      const auto rows = std::min(row_tile, static_cast<IdxT>(m - row_offset));
-      auto row_output =
-        raft::make_device_vector_view<NativeOutputT, IdxT>(output + row_offset, rows);
-      for (IdxT candidate_offset = 0; candidate_offset < n;) {
-        const auto candidates = std::min(candidate_tile, static_cast<IdxT>(n - candidate_offset));
-        auto* tile_output     = candidate_offset == 0 ? row_output.data_handle() : candidate_min;
-        unfusedDistanceNNMinReduce<DataT, DataT, NativeOutputT, IdxT>(
-          handle,
-          tile_output,
-          x + static_cast<std::size_t>(row_offset) * static_cast<std::size_t>(k),
-          y + static_cast<std::size_t>(candidate_offset) * static_cast<std::size_t>(k),
-          xn + row_offset,
-          yn + candidate_offset,
-          rows,
-          candidates,
-          k,
-          workspace,
-          sqrt,
-          candidate_offset != 0 || init_out_buffer,
-          is_row_major,
-          metric,
-          metric_arg,
-          strict_fp32);
-        if (candidate_offset != 0) {
-          auto candidate_output =
-            raft::make_device_vector_view<const NativeOutputT, IdxT>(candidate_min, rows);
-          raft::linalg::map(
-            handle,
-            row_output,
-            [candidate_offset] __device__(NativeOutputT current, NativeOutputT candidate) {
-              if constexpr (std::is_same_v<NativeOutputT, KeyValueT>) {
-                candidate.key += candidate_offset;
-                return candidate.value < current.value ? candidate : current;
-              } else {
-                return candidate < current ? candidate : current;
-              }
-            },
-            raft::make_const_mdspan(row_output),
-            candidate_output);
-        }
-        candidate_offset += candidates;
-      }
-      row_offset += rows;
-    }
+  if constexpr (is_byte_distance_v<DataT> &&
+                std::is_same_v<OutputT, typename OutputTypes::separate>) {
+    RAFT_EXPECTS(init_out_buffer, "Byte top-1 requires initializing the output");
+    byte_top_1(handle, x, y, output.nearest_idx, output.nearest_dist, m, n, k, sqrt);
   } else {
-    RAFT_FAIL("Unfused top_1_nn requires matching norm types and native KVP or scalar output");
+    RAFT_EXPECTS(metric != cuvs::distance::DistanceType::InnerProduct,
+                 "Unfused top_1_nn does not support InnerProduct");
+    RAFT_EXPECTS(matching_norm_type, "Unfused top_1_nn requires matching norm types");
+
+    if constexpr (matching_norm_type && is_native_output) {
+      RAFT_EXPECTS(output != nullptr, "Unfused top_1_nn requires a native output buffer");
+      const auto layout = make_unfused_top_1_nn_workspace_layout<DataT>(m, n, tuning);
+      RAFT_EXPECTS(layout.total_bytes == 0 || workspace != nullptr,
+                   "Unfused top_1_nn requires a workspace buffer");
+      RAFT_EXPECTS(workspace_bytes >= layout.total_bytes,
+                   "Unfused top_1_nn workspace is smaller than its configured tile");
+
+      const auto row_tile       = layout.row_tile;
+      const auto candidate_tile = layout.candidate_tile;
+      auto* candidate_min       = layout.candidate_bytes == 0
+                                    ? nullptr
+                                    : reinterpret_cast<NativeOutputT*>(static_cast<char*>(workspace) +
+                                                                 layout.candidate_offset);
+      for (IdxT row_offset = 0; row_offset < m;) {
+        const auto rows = std::min(row_tile, static_cast<IdxT>(m - row_offset));
+        auto row_output =
+          raft::make_device_vector_view<NativeOutputT, IdxT>(output + row_offset, rows);
+        for (IdxT candidate_offset = 0; candidate_offset < n;) {
+          const auto candidates = std::min(candidate_tile, static_cast<IdxT>(n - candidate_offset));
+          auto* tile_output     = candidate_offset == 0 ? row_output.data_handle() : candidate_min;
+          unfusedDistanceNNMinReduce<DataT, DataT, NativeOutputT, IdxT>(
+            handle,
+            tile_output,
+            x + static_cast<std::size_t>(row_offset) * static_cast<std::size_t>(k),
+            y + static_cast<std::size_t>(candidate_offset) * static_cast<std::size_t>(k),
+            xn + row_offset,
+            yn + candidate_offset,
+            rows,
+            candidates,
+            k,
+            workspace,
+            sqrt,
+            candidate_offset != 0 || init_out_buffer,
+            is_row_major,
+            metric,
+            metric_arg,
+            strict_fp32);
+          if (candidate_offset != 0) {
+            auto candidate_output =
+              raft::make_device_vector_view<const NativeOutputT, IdxT>(candidate_min, rows);
+            raft::linalg::map(
+              handle,
+              row_output,
+              [candidate_offset] __device__(NativeOutputT current, NativeOutputT candidate) {
+                if constexpr (std::is_same_v<NativeOutputT, KeyValueT>) {
+                  candidate.key += candidate_offset;
+                  return candidate.value < current.value ? candidate : current;
+                } else {
+                  return candidate < current ? candidate : current;
+                }
+              },
+              raft::make_const_mdspan(row_output),
+              candidate_output);
+          }
+          candidate_offset += candidates;
+        }
+        row_offset += rows;
+      }
+    } else {
+      RAFT_FAIL("Unfused top_1_nn requires matching norm types and native KVP or scalar output");
+    }
   }
 }
 
@@ -752,6 +758,7 @@ std::size_t top_1_nn_workspace_size(IdxT m,
     case detail::Top1nnBackend::Cutlass:
       return detail::checked_top_1_nn_workspace_multiply(rows, sizeof(int));
     case detail::Top1nnBackend::Unfused:
+      if constexpr (detail::is_byte_distance_v<DataT>) { return 0; }
       return detail::make_unfused_top_1_nn_workspace_layout<DataT>(m, n, tuning).total_bytes;
   }
   RAFT_FAIL("Unknown top_1_nn backend");
@@ -797,14 +804,17 @@ detail::Top1nnPlan<IdxT> probe_top_1_nn(raft::resources const& handle,
   if (requested_backend == detail::Top1nnBackend::Auto) {
     bool use_cutile = false;
 #if CUDART_VERSION >= 13000
-    use_cutile = plan.tf32_assignment && detail::is_top_1_nn_backend_available(
-                                           detail::Top1nnBackend::Cutile, x, y, m, n, k, metric);
+    use_cutile =
+      (plan.tf32_assignment || detail::is_byte_distance_v<DataT>) &&
+      detail::is_top_1_nn_backend_available(detail::Top1nnBackend::Cutile, x, y, m, n, k, metric);
 #endif
     if (use_cutile) {
       resolved = detail::Top1nnBackend::Cutile;
     } else {
       const auto prop = raft::resource::get_device_properties(handle);
-      resolved        = detail::legacy_top_1_nn_backend(prop.major, m, n, metric);
+      resolved        = detail::is_byte_distance_v<DataT>
+                          ? detail::Top1nnBackend::Unfused
+                          : detail::legacy_top_1_nn_backend(prop.major, m, n, metric);
     }
     if (!detail::is_top_1_nn_backend_available(resolved, x, y, m, n, k, metric)) { return plan; }
   } else {
@@ -827,7 +837,7 @@ detail::Top1nnPlan<IdxT> probe_top_1_nn(raft::resources const& handle,
       detail::checked_top_1_nn_workspace_add(label_bytes, plan.workspace_bytes);
     plan.workspace_alignment = std::max<std::size_t>(16, plan.workspace_alignment);
   }
-  if (resolved == detail::Top1nnBackend::Cutile) {
+  if (resolved == detail::Top1nnBackend::Cutile || detail::is_byte_distance_v<DataT>) {
     using DistanceT                 = detail::top_1_nn_distance_t<DataT>;
     constexpr std::size_t alignment = 16;
     if (store_indices) {

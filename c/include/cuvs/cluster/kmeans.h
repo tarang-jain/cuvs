@@ -184,6 +184,10 @@ typedef enum { CUVS_KMEANS_TYPE_KMEANS = 0, CUVS_KMEANS_TYPE_KMEANS_BALANCED = 1
  *   cuvsKMeansFit(res, params, X, sample_weight, centroids, &inertia, &n_iter);
  * @endcode
  *
+ * Native int8/uint8 Lloyd input uses float32 centroids and sample weights in
+ * the original integer units. Samples are never materialized as a float
+ * dataset.
+ *
  * @param[in]     res           opaque C handle
  * @param[in]     params        Parameters for KMeans model.
  * @param[in]     X             Training instances to cluster. The data must
@@ -214,6 +218,8 @@ CUVS_EXPORT cuvsError_t cuvsKMeansFit(cuvsResources_t res,
 /**
  * @brief Predict the closest cluster each sample in X belongs to.
  *
+ * For int8/uint8 input, centroids and weights are float32 and labels are int64.
+ *
  * @param[in]     res              opaque C handle
  * @param[in]     params           Parameters for KMeans model.
  * @param[in]     X                New data to predict.
@@ -241,6 +247,7 @@ CUVS_EXPORT cuvsError_t cuvsKMeansPredict(cuvsResources_t res,
 
 /**
  * @brief Compute cluster cost
+ * Native int8/uint8 input requires float32 centroids in the original units.
  *
  * @param[in]  res            opaque C handle
  * @param[in]  X              Training instances to cluster. The data must

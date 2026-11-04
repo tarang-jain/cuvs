@@ -43,4 +43,22 @@ void cluster_cost(const raft::resources& handle,
 {
   cuvs::cluster::kmeans::cluster_cost<double, int64_t>(handle, X, centroids, cost, sample_weight);
 }
+
+void cluster_cost(const raft::resources& handle,
+                  raft::device_matrix_view<const int8_t, int64_t> X,
+                  raft::device_matrix_view<const float, int64_t> centroids,
+                  raft::host_scalar_view<float> cost,
+                  std::optional<raft::device_vector_view<const float, int64_t>> sample_weight)
+{
+  cuvs::cluster::kmeans::cluster_cost<float, int64_t>(handle, X, centroids, cost, sample_weight);
+}
+
+void cluster_cost(const raft::resources& handle,
+                  raft::device_matrix_view<const uint8_t, int64_t> X,
+                  raft::device_matrix_view<const float, int64_t> centroids,
+                  raft::host_scalar_view<float> cost,
+                  std::optional<raft::device_vector_view<const float, int64_t>> sample_weight)
+{
+  cuvs::cluster::kmeans::cluster_cost<float, int64_t>(handle, X, centroids, cost, sample_weight);
+}
 }  // namespace cuvs::cluster::kmeans

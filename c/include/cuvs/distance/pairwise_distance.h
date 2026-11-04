@@ -22,6 +22,8 @@ extern "C" {
 /**
  * @brief Compute pairwise distances for two matrices
  *
+ * Native int8/uint8 inputs require row-major layout and float32 output, and
+ * support L2 and inner product in the original integer units.
  *
  * Usage example:
  * @code{.c}

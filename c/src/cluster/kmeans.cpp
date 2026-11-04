@@ -4,6 +4,7 @@
  */
 
 #include <cstdint>
+#include <type_traits>
 
 #include <dlpack/dlpack.h>
 
@@ -50,6 +51,7 @@ void _fit(cuvsResources_t res,
           double* inertia,
           int* n_iter)
 {
+  using MathT = std::conditional_t<std::is_integral_v<T>, float, T>;
   auto X       = X_tensor->dl_tensor;
   auto res_ptr = reinterpret_cast<raft::resources*>(res);
 
@@ -68,72 +70,69 @@ void _fit(cuvsResources_t res,
 
     auto X_view = raft::make_host_matrix_view<T const, IdxT>(
       reinterpret_cast<T const*>(X.data), n_samples, n_features);
-    auto centroids_view =
-      cuvs::core::from_dlpack<raft::device_matrix_view<T, IdxT, raft::row_major>>(
+    auto centroids_view = cuvs::core::from_dlpack<
+        raft::device_matrix_view<MathT, IdxT, raft::row_major>>(
         centroids_tensor);
 
-    std::optional<raft::host_vector_view<T const, IdxT>> sample_weight;
+    std::optional<raft::host_vector_view<MathT const, IdxT>> sample_weight;
     if (sample_weight_tensor != NULL) {
       auto sw = sample_weight_tensor->dl_tensor;
       if (!cuvs::core::is_dlpack_host_compatible(sw)) {
         RAFT_FAIL("sample_weight must be host accessible when X is on host");
       }
-      sample_weight = raft::make_host_vector_view<T const, IdxT>(
-        reinterpret_cast<T const*>(sw.data), n_samples);
+      sample_weight =
+          cuvs::core::from_dlpack<raft::host_vector_view<const MathT, IdxT>>(
+              sample_weight_tensor);
     }
 
-    T inertia_temp;
+    MathT inertia_temp;
     IdxT n_iter_temp;
 
     auto kmeans_params = convert_params(params);
-    cuvs::cluster::kmeans::fit(*res_ptr,
-                               kmeans_params,
-                               X_view,
-                               sample_weight,
-                               centroids_view,
-                               raft::make_host_scalar_view<T>(&inertia_temp),
-                               raft::make_host_scalar_view<IdxT>(&n_iter_temp));
+    cuvs::cluster::kmeans::fit(
+        *res_ptr, kmeans_params, X_view, sample_weight, centroids_view,
+        raft::make_host_scalar_view<MathT>(&inertia_temp),
+        raft::make_host_scalar_view<IdxT>(&n_iter_temp));
 
     *inertia = inertia_temp;
     *n_iter  = n_iter_temp;
 
   } else {
     using const_mdspan_type = raft::device_matrix_view<T const, IdxT, raft::row_major>;
-    using mdspan_type       = raft::device_matrix_view<T, IdxT, raft::row_major>;
+    using mdspan_type = raft::device_matrix_view<MathT, IdxT, raft::row_major>;
 
     if (params.hierarchical) {
       if (sample_weight_tensor != NULL) {
         RAFT_FAIL("sample_weight cannot be used with hierarchical kmeans");
       }
 
-      if constexpr (std::is_same_v<T, double>) {
-        RAFT_FAIL("float64 is an unsupported dtype for hierarchical kmeans");
+      if constexpr (!std::is_same_v<T, float>) {
+        RAFT_FAIL("hierarchical kmeans requires float32");
       } else {
         auto kmeans_params = convert_balanced_params(params);
-        T inertia_temp;
-        auto inertia_view = raft::make_host_scalar_view<T>(&inertia_temp);
+        MathT inertia_temp;
+        auto inertia_view = raft::make_host_scalar_view<MathT>(&inertia_temp);
         cuvs::cluster::kmeans::fit(*res_ptr, kmeans_params, cuvs::core::from_dlpack<const_mdspan_type>(X_tensor), cuvs::core::from_dlpack<mdspan_type>(centroids_tensor), std::make_optional(inertia_view));
         *inertia = inertia_temp;
         *n_iter  = params.hierarchical_n_iters;
       }
     } else {
-      T inertia_temp;
+      MathT inertia_temp;
       IdxT n_iter_temp;
 
-      std::optional<raft::device_vector_view<T const, IdxT>> sample_weight;
+      std::optional<raft::device_vector_view<MathT const, IdxT>> sample_weight;
       if (sample_weight_tensor != NULL) {
-        sample_weight =
-          cuvs::core::from_dlpack<raft::device_vector_view<T const, IdxT>>(sample_weight_tensor);
+        sample_weight = cuvs::core::from_dlpack<
+            raft::device_vector_view<MathT const, IdxT>>(sample_weight_tensor);
       }
 
       auto kmeans_params = convert_params(params);
-      cuvs::cluster::kmeans::fit(*res_ptr,
-                                 kmeans_params,
-                                 cuvs::core::from_dlpack<const_mdspan_type>(X_tensor),
-                                 sample_weight,
-                                 cuvs::core::from_dlpack<mdspan_type>(centroids_tensor),
-                                 raft::make_host_scalar_view<T>(&inertia_temp),
-                                 raft::make_host_scalar_view<IdxT>(&n_iter_temp));
+      cuvs::cluster::kmeans::fit(
+          *res_ptr, kmeans_params,
+          cuvs::core::from_dlpack<const_mdspan_type>(X_tensor), sample_weight,
+          cuvs::core::from_dlpack<mdspan_type>(centroids_tensor),
+          raft::make_host_scalar_view<MathT>(&inertia_temp),
+          raft::make_host_scalar_view<IdxT>(&n_iter_temp));
       *inertia = inertia_temp;
       *n_iter  = n_iter_temp;
     }
@@ -150,6 +149,7 @@ void _predict(cuvsResources_t res,
               bool normalize_weight,
               double* inertia)
 {
+  using MathT = std::conditional_t<std::is_integral_v<T>, float, T>;
   auto X       = X_tensor->dl_tensor;
   auto res_ptr = reinterpret_cast<raft::resources*>(res);
 
@@ -162,33 +162,33 @@ void _predict(cuvsResources_t res,
         RAFT_FAIL("sample_weight cannot be used with hierarchical kmeans");
       }
 
-      if constexpr (std::is_same_v<T, double>) {
-        RAFT_FAIL("float64 is an unsupported dtype for hierarchical kmeans");
+      if constexpr (!std::is_same_v<T, float>) {
+        RAFT_FAIL("hierarchical kmeans requires float32");
       } else {
         auto kmeans_params = convert_balanced_params(params);
-        cuvs::cluster::kmeans::predict(*res_ptr,
-                                       kmeans_params,
-                                       cuvs::core::from_dlpack<const_mdspan_type>(X_tensor),
-                                       cuvs::core::from_dlpack<const_mdspan_type>(centroids_tensor),
-                                       cuvs::core::from_dlpack<labels_mdspan_type>(labels_tensor));
+        cuvs::cluster::kmeans::predict(
+            *res_ptr, kmeans_params,
+            cuvs::core::from_dlpack<const_mdspan_type>(X_tensor),
+            cuvs::core::from_dlpack<
+                raft::device_matrix_view<const MathT, IdxT>>(centroids_tensor),
+            cuvs::core::from_dlpack<labels_mdspan_type>(labels_tensor));
         *inertia = 0;
       }
     } else {
       auto kmeans_params = convert_params(params);
-      T inertia_temp;
-      std::optional<raft::device_vector_view<T const, IdxT>> sample_weight;
+      MathT inertia_temp;
+      std::optional<raft::device_vector_view<MathT const, IdxT>> sample_weight;
       if (sample_weight_tensor != NULL) {
-        sample_weight =
-          cuvs::core::from_dlpack<raft::device_vector_view<T const, IdxT>>(sample_weight_tensor);
+        sample_weight = cuvs::core::from_dlpack<
+            raft::device_vector_view<MathT const, IdxT>>(sample_weight_tensor);
       }
-      cuvs::cluster::kmeans::predict(*res_ptr,
-                                     kmeans_params,
-                                     cuvs::core::from_dlpack<const_mdspan_type>(X_tensor),
-                                     sample_weight,
-                                     cuvs::core::from_dlpack<const_mdspan_type>(centroids_tensor),
-                                     cuvs::core::from_dlpack<labels_mdspan_type>(labels_tensor),
-                                     normalize_weight,
-                                     raft::make_host_scalar_view<T>(&inertia_temp));
+      cuvs::cluster::kmeans::predict(
+          *res_ptr, kmeans_params,
+          cuvs::core::from_dlpack<const_mdspan_type>(X_tensor), sample_weight,
+          cuvs::core::from_dlpack<raft::device_matrix_view<const MathT, IdxT>>(
+              centroids_tensor),
+          cuvs::core::from_dlpack<labels_mdspan_type>(labels_tensor),
+          normalize_weight, raft::make_host_scalar_view<MathT>(&inertia_temp));
       *inertia = inertia_temp;
     }
   } else {
@@ -202,18 +202,20 @@ void _cluster_cost(cuvsResources_t res,
                    DLManagedTensor* centroids_tensor,
                    double* cost)
 {
+  using MathT = std::conditional_t<std::is_integral_v<T>, float, T>;
   auto X       = X_tensor->dl_tensor;
   auto res_ptr = reinterpret_cast<raft::resources*>(res);
 
-  T cost_temp;
+  MathT cost_temp;
 
   if (cuvs::core::is_dlpack_device_compatible(X)) {
     using mdspan_type = raft::device_matrix_view<const T, IdxT, raft::row_major>;
 
-    cuvs::cluster::kmeans::cluster_cost(*res_ptr,
-                                        cuvs::core::from_dlpack<mdspan_type>(X_tensor),
-                                        cuvs::core::from_dlpack<mdspan_type>(centroids_tensor),
-                                        raft::make_host_scalar_view<T>(&cost_temp));
+    cuvs::cluster::kmeans::cluster_cost(
+        *res_ptr, cuvs::core::from_dlpack<mdspan_type>(X_tensor),
+        cuvs::core::from_dlpack<raft::device_matrix_view<const MathT, IdxT>>(
+            centroids_tensor),
+        raft::make_host_scalar_view<MathT>(&cost_temp));
   } else {
     RAFT_FAIL("X dataset must be accessible on device memory");
   }
@@ -263,6 +265,12 @@ extern "C" cuvsError_t cuvsKMeansFit(cuvsResources_t res,
       _fit<float>(res, *params, X, sample_weight, centroids, inertia, n_iter);
     } else if (dataset.dtype.code == kDLFloat && dataset.dtype.bits == 64) {
       _fit<double>(res, *params, X, sample_weight, centroids, inertia, n_iter);
+    } else if (dataset.dtype.code == kDLInt && dataset.dtype.bits == 8) {
+      _fit<int8_t, int64_t>(res, *params, X, sample_weight, centroids, inertia,
+                            n_iter);
+    } else if (dataset.dtype.code == kDLUInt && dataset.dtype.bits == 8) {
+      _fit<uint8_t, int64_t>(res, *params, X, sample_weight, centroids, inertia,
+                             n_iter);
     } else {
       RAFT_FAIL("Unsupported dataset DLtensor dtype: %d and bits: %d",
                 dataset.dtype.code,
@@ -286,6 +294,14 @@ extern "C" cuvsError_t cuvsKMeansPredict(cuvsResources_t res,
         _predict<float>(res, *params, X, sample_weight, centroids, labels, normalize_weight, inertia);
     } else if (dataset.dtype.code == kDLFloat && dataset.dtype.bits == 64) {
         _predict<double>(res, *params, X, sample_weight, centroids, labels, normalize_weight, inertia);
+    } else if (dataset.dtype.code == kDLInt && dataset.dtype.bits == 8) {
+      _predict<int8_t, int64_t, int64_t>(res, *params, X, sample_weight,
+                                         centroids, labels, normalize_weight,
+                                         inertia);
+    } else if (dataset.dtype.code == kDLUInt && dataset.dtype.bits == 8) {
+      _predict<uint8_t, int64_t, int64_t>(res, *params, X, sample_weight,
+                                          centroids, labels, normalize_weight,
+                                          inertia);
     } else {
       RAFT_FAIL("Unsupported dataset DLtensor dtype: %d and bits: %d",
                 dataset.dtype.code,
@@ -305,6 +321,10 @@ extern "C" cuvsError_t cuvsKMeansClusterCost(cuvsResources_t res,
       _cluster_cost<float>(res, X, centroids, cost);
     } else if (dataset.dtype.code == kDLFloat && dataset.dtype.bits == 64) {
       _cluster_cost<double>(res, X, centroids, cost);
+    } else if (dataset.dtype.code == kDLInt && dataset.dtype.bits == 8) {
+      _cluster_cost<int8_t, int64_t>(res, X, centroids, cost);
+    } else if (dataset.dtype.code == kDLUInt && dataset.dtype.bits == 8) {
+      _cluster_cost<uint8_t, int64_t>(res, X, centroids, cost);
     } else {
       RAFT_FAIL("Unsupported dataset DLtensor dtype: %d and bits: %d",
                 dataset.dtype.code,

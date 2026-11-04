@@ -6,6 +6,7 @@
 
 #include "../../distance/distance.cuh"
 #include "../../distance/top_1_nn.cuh"
+#include "kmeans_byte_distance.cuh"
 #include <cstdint>
 #include <cuvs/cluster/kmeans.hpp>
 #include <cuvs/distance/distance.hpp>
@@ -348,13 +349,13 @@ void weightAndComputeClusterCost(raft::resources const& handle,
   });
 }
 
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void sampleCentroids(raft::resources const& handle,
-                     raft::device_matrix_view<const DataT, IndexT> X,
+                     raft::device_matrix_view<const InputT, IndexT> X,
                      raft::device_vector_view<DataT, IndexT> minClusterDistance,
                      raft::device_vector_view<uint8_t, IndexT> isSampleCentroid,
                      SamplingOp<DataT, IndexT>& select_op,
-                     rmm::device_uvector<DataT>& inRankCp,
+                     rmm::device_uvector<InputT>& inRankCp,
                      rmm::device_uvector<char>& workspace)
 {
   cudaStream_t stream  = raft::resource::get_cuda_stream(handle).get();
@@ -402,7 +403,7 @@ void sampleCentroids(raft::resources const& handle,
 
   inRankCp.resize(nPtsSampledInRank * n_features, stream);
 
-  raft::matrix::gather((DataT*)X.data_handle(),
+  raft::matrix::gather((InputT*)X.data_handle(),
                        X.extent(1),
                        X.extent(0),
                        sampledMinClusterDistance.data_handle(),
@@ -619,10 +620,10 @@ void countSamplesInCluster(raft::resources const& handle,
  *                                  if false, this call's contribution is accumulated into the
  *                                  existing `centroid_sums`
  */
-template <typename DataT, typename IndexT, typename LabelsIterator>
+template <typename DataT, typename IndexT, typename LabelsIterator, typename InputT = DataT>
 void compute_centroid_adjustments(
   raft::resources const& handle,
-  raft::device_matrix_view<const DataT, IndexT, raft::row_major> X,
+  raft::device_matrix_view<const InputT, IndexT, raft::row_major> X,
   raft::device_vector_view<const DataT, IndexT> sample_weights,
   LabelsIterator cluster_labels,
   IndexT n_clusters,
@@ -636,7 +637,14 @@ void compute_centroid_adjustments(
 
   workspace.resize(n_samples, stream);
 
-  raft::linalg::reduce_rows_by_key(X.data_handle(),
+  auto input = [&] {
+    if constexpr (std::is_same_v<InputT, DataT>) {
+      return X.data_handle();
+    } else {
+      return thrust::make_transform_iterator(X.data_handle(), raft::cast_op<DataT>{});
+    }
+  }();
+  raft::linalg::reduce_rows_by_key(input,
                                    X.extent(1),
                                    cluster_labels,
                                    sample_weights.data_handle(),
@@ -782,9 +790,9 @@ __device__ void check_convergence(raft::device_scalar_view<const DataT> clusteri
  * @param[inout]  clustering_cost      Running cost scalar (device) (added into)
  * @param[out]    batch_cost           Reusable scratch scalar for this batch's cost
  */
-template <typename DataT, typename IndexT>
+template <typename DataT, typename IndexT, typename InputT = DataT>
 void process_batch(raft::resources const& handle,
-                   raft::device_matrix_view<const DataT, IndexT> batch_data,
+                   raft::device_matrix_view<const InputT, IndexT> batch_data,
                    raft::device_vector_view<const DataT, IndexT> batch_weights,
                    raft::device_matrix_view<const DataT, IndexT> centroids,
                    cuvs::distance::DistanceType metric,

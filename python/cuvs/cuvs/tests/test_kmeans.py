@@ -165,3 +165,84 @@ def test_fit_host_with_stream_pool_setter():
     assert n_iter >= 1
     assert np.isfinite(inertia)
     assert np.allclose(centroids.copy_to_host(), [[0, 0], [10, 10]], atol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+@pytest.mark.parametrize("host_input", [False, True])
+def test_native_byte_lloyd(dtype, host_input):
+    origin = -110 if dtype == np.int8 else 170
+    rows = np.arange(7)
+    values = origin + np.where(rows < 3, rows, 40 + rows)
+    samples = (values[:, None] + np.arange(17)[None, :] % 3).astype(dtype)
+    weights = np.array([1, 2, 3, 1, 4, 2, 1], dtype=np.float32)
+    initial = samples[[0, 3]].astype(np.float32)
+    data = samples if host_input else device_ndarray(samples)
+    sample_weights = weights if host_input else device_ndarray(weights)
+    params = KMeansParams(
+        n_clusters=2,
+        init_method="Array",
+        max_iter=1,
+        batch_samples=3,
+        device_buffer_samples=2,
+    )
+    centers, inertia, iterations = fit(
+        params, data, device_ndarray(initial), sample_weights=sample_weights
+    )
+    expected = np.vstack(
+        [
+            np.average(samples[:3], axis=0, weights=weights[:3]),
+            np.average(samples[3:], axis=0, weights=weights[3:]),
+        ]
+    )
+    assert centers.dtype == np.float32
+    assert iterations == 1
+    np.testing.assert_allclose(centers.copy_to_host(), expected, atol=2e-5)
+    distances = (
+        (samples[:, None, :].astype(np.float64) - expected[None, :, :]) ** 2
+    ).sum(axis=2)
+    expected_cost = (
+        (distances.min(axis=1) * weights).sum() * len(rows) / weights.sum()
+    )
+    np.testing.assert_allclose(inertia, expected_cost, rtol=1e-5, atol=1e-3)
+    device_data = device_ndarray(samples)
+    labels, predicted_cost = predict(
+        params, device_data, centers, sample_weights=device_ndarray(weights)
+    )
+    assert labels.dtype == np.int64
+    np.testing.assert_array_equal(
+        labels.copy_to_host(), distances.argmin(axis=1)
+    )
+    np.testing.assert_allclose(
+        predicted_cost, expected_cost, rtol=1e-5, atol=1e-3
+    )
+    np.testing.assert_allclose(
+        cluster_cost(device_data, centers),
+        distances.min(axis=1).sum(),
+        rtol=1e-5,
+        atol=1e-3,
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+def test_native_byte_dtypes(dtype):
+    data = device_ndarray(np.array([[0], [1], [9], [10]], dtype=dtype))
+    params = KMeansParams(n_clusters=2)
+    centers, _, _ = fit(params, data)
+    assert centers.dtype == np.float32
+    with pytest.raises(TypeError):
+        fit(params, data, device_ndarray(np.zeros((2, 1), dtype=dtype)))
+    with pytest.raises(TypeError):
+        fit(
+            params,
+            data,
+            sample_weights=device_ndarray(np.ones(4, dtype=dtype)),
+        )
+    with pytest.raises(TypeError):
+        predict(
+            params,
+            data,
+            centers,
+            labels=device_ndarray(np.zeros(4, dtype=np.int32)),
+        )
+    with pytest.raises(ValueError):
+        fit(KMeansParams(n_clusters=2, hierarchical=True), data)

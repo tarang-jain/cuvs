@@ -22,6 +22,8 @@ cuvsDistanceType metric,
 float metric_arg);
 ```
 
+Native int8/uint8 inputs require row-major layout and float32 output, and support L2 and inner product in the original integer units.
+
 Usage example:
 
 **Parameters**
