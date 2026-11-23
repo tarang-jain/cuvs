@@ -77,7 +77,8 @@ __launch_bounds__(P::Nthreads, 2) RAFT_KERNEL fusedDistanceNNkernel(OutT* min,
 
 #if __CUDA_ARCH__ >= 800
   static constexpr bool compile =
-    std::is_same_v<OpT, ops::bitwise_hamming_distance_op<uint8_t, uint32_t, IdxT>>;
+    std::is_same_v<OpT, ops::bitwise_hamming_distance_op<uint8_t, uint32_t, IdxT>> ||
+    std::is_same_v<OpT, ops::bitwise_hamming_distance_op<uint32_t, uint32_t, IdxT>>;
 #else
   static constexpr bool compile = true;
 #endif

@@ -113,10 +113,10 @@ void fusedDistanceNN(raft::resources const& handle,
   }
   if (m == 0) { return; }
 
-  // When k is smaller than 32, the Policy4x4 results in redundant calculations
-  // as it uses tiles that have k=32. Therefore, use a "skinny" policy instead
+  // When k is smaller than the Policy4x4 k-block (32 elements, or 64 for packed uint8_t), the
+  // Policy4x4 results in redundant calculations. Therefore, use a "skinny" policy instead
   // that uses tiles with a smaller value of k.
-  bool is_skinny = k < 32;
+  bool is_skinny = k < (std::is_same_v<DataT, uint8_t> ? 64 : 32);
   // Packed bytes use at most four elements per vectorized load.
   constexpr int veclen16 = std::is_same_v<DataT, uint8_t> ? 4 : 16 / sizeof(DataT);
   constexpr int veclen8  = std::is_same_v<DataT, uint8_t> ? 4 : 8 / sizeof(DataT);
